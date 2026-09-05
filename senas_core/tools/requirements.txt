@@ -1,0 +1,15 @@
+# Dependencias para la ingesta de videos y el reconocimiento por DTW.
+# Instalar con: pip install -r tools/requirements.txt
+#
+# (Las de test/golden -- dart/pytest -- no estan aca porque no usan nada
+# de esto; sign_norm.py y dtw.py son Python puro sin dependencias.)
+
+mediapipe>=0.10.9
+opencv-python>=4.9
+psycopg2-binary>=2.9
+python-dotenv>=1.0
+requests>=2.31
+
+# Opcional: solo hace falta si usas --excel en tools/ingest_carpeta.py para
+# sacar el texto en español/categoria de un Excel en vez del nombre de archivo.
+openpyxl>=3.1

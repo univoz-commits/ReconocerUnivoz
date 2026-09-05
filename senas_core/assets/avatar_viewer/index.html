@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<!--
+  Visor del avatar VRM. Corre dentro de un WebView (webview_flutter), cargado
+  como asset local de Flutter (avatar_bridge.dart). No es parte del proyecto
+  npm de nadie: es una pagina suelta que importa three.js y three-vrm como
+  modulos ES directamente desde un CDN.
+
+  OJO: esto necesita internet la primera vez que se abre la pantalla del
+  avatar (para bajar las librerias del CDN). Si el telefono lo abre offline
+  la primera vez, el visor va a quedar en blanco. Una vez que el WebView las
+  cachea puede que sigan andando offline, pero no esta garantizado. Si esto
+  llega a ser un problema, la solucion es bajar three.module.js y
+  three-vrm.module.js a mano y ponerlos en assets/avatar_viewer/lib/, y
+  cambiar los imports de abajo por rutas locales.
+
+  Como lo maneja Dart (ver avatar_bridge.dart):
+    - Flutter llama a window.reproducirSecuencia(seqJson) con una lista de
+      frames, cada uno un array de 138 numeros (el mismo formato que usa
+      sign_norm.dart / dtw.dart para reconocer).
+    - Esta pagina interpola entre frames y mueve los huesos del humanoid VRM
+      en tiempo real.
+    - Cuando termina, llama a window.SenasChannel.postMessage('fin') para
+      que Dart sepa que puede reproducir la siguiente palabra.
+-->
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    html, body { margin: 0; padding: 0; overflow: hidden; background: transparent; }
+    #lienzo { width: 100vw; height: 100vh; display: block; }
+    #estado {
+      position: fixed; left: 8px; bottom: 8px; z-index: 10;
+      font: 12px sans-serif; color: #b00; background: #fff8;
+      padding: 4px 8px; border-radius: 6px; display: none;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="lienzo"></canvas>
+  <div id="estado"></div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+      "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@2/lib/three-vrm.module.min.js"
+    }
+  }
+  </script>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import { VRMLoaderPlugin, VRMUtils, VRMHumanBoneName } from '@pixiv/three-vrm';
+
+    const $estado = document.getElementById('estado');
+    function avisar(msg) {
+      // Errores visibles en el propio WebView: no hay consola a mano en un
+      // telefono, asi que si algo se rompe (por ejemplo sin internet la
+      // primera vez) al menos se ve un cartel en vez de una pantalla negra
+      // muda.
+      console.error(msg);
+      $estado.textContent = msg;
+      $estado.style.display = 'block';
+    }
+
+    // ---------------------------------------------------------------------
+    // Escena
+    // ---------------------------------------------------------------------
+    const lienzo = document.getElementById('lienzo');
+    const renderer = new THREE.WebGLRenderer({ canvas: lienzo, alpha: true, antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio || 1);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(35, window.innerWidth / window.innerHeight, 0.1, 20);
+    // Encuadre de la cintura para arriba: el punto que mira la camara
+    // (lookAt) queda a la altura del pecho, y la distancia/FOV estan
+    // calculados para que entre desde la cintura hasta la cabeza.
+    camera.position.set(0, 1.25, 1.3);
+    camera.lookAt(0, 1.22, 0);
+
+    scene.add(new THREE.AmbientLight(0xffffff, 1.1));
+    const luzDirigida = new THREE.DirectionalLight(0xffffff, 0.9);
+    luzDirigida.position.set(1, 2, 1.5);
+    scene.add(luzDirigida);
+
+    window.addEventListener('resize', () => {
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+    });
+
+    // ---------------------------------------------------------------------
+    // Carga del VRM
+    // ---------------------------------------------------------------------
+    let vrm = null;
+    let anchoHombrosAvatar = 0.34; // fallback tipico si no se puede medir
+
+    const loader = new GLTFLoader();
+    loader.register((parser) => new VRMLoaderPlugin(parser));
+
+    function onAvatarCargado(gltf) {
+      vrm = gltf.userData.vrm;
+      VRMUtils.removeUnnecessaryVertices(gltf.scene);
+      VRMUtils.removeUnnecessaryJoints(gltf.scene);
+      vrm.scene.rotation.y = Math.PI; // three-vrm mira a +Z, la camara esta en -Z
+      scene.add(vrm.scene);
+
+      // Mide el ancho real de hombros del avatar (mundo) para poder
+      // convertir las coordenadas normalizadas (shoulder-width = 1) a
+      // metros de este modelo en particular.
+      const hL = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.LeftUpperArm);
+      const hR = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.RightUpperArm);
+      if (hL && hR) {
+        const pL = new THREE.Vector3(); hL.getWorldPosition(pL);
+        const pR = new THREE.Vector3(); hR.getWorldPosition(pR);
+        const d = pL.distanceTo(pR);
+        if (d > 0.05) anchoHombrosAvatar = d;
+      }
+
+      // Postura de reposo: brazos un poco separados del cuerpo para que
+      // el 2-bone IK de abajo tenga margen para moverlos sin chocar con
+      // el torso.
+      posarReposo();
+      window.parlanteVrmListo = true;
+    }
+
+    // El modelo NO se pide por fetch/URL: en un WebView cargado con
+    // loadFlutterAsset() las rutas relativas a otros assets de Flutter no
+    // son confiables (dependen de como cada plataforma arme el dominio
+    // virtual del asset loader). En cambio, Dart lee los bytes del .vrm con
+    // rootBundle (avatar_bridge.dart) y se los manda a esta funcion ya
+    // codificados en base64, apenas la pagina esta lista para recibirlos.
+    window.cargarAvatarBase64 = function (b64) {
+      try {
+        const binario = atob(b64);
+        const bytes = new Uint8Array(binario.length);
+        for (let i = 0; i < binario.length; i++) bytes[i] = binario.charCodeAt(i);
+        loader.parse(bytes.buffer, '', onAvatarCargado,
+          (err) => avisar('No se pudo cargar el avatar: ' + err));
+      } catch (e) {
+        avisar('No se pudo decodificar el avatar: ' + e);
+      }
+    };
+
+    // Avisa a Dart que la pagina ya cargo three.js/three-vrm y esta lista
+    // para recibir el modelo.
+    if (window.SenasChannel) window.SenasChannel.postMessage('js_listo');
+
+    function bone(nombre) {
+      return vrm ? vrm.humanoid.getNormalizedBoneNode(nombre) : null;
+    }
+
+    function posarReposo() {
+      // Para este rig, rotation 0 en los huesos normalizados es el T-pose
+      // (brazos horizontales) -- no la pose de reposo. Hay que rotar cada
+      // brazo casi 90 grados desde ahi para que caiga a los costados del
+      // cuerpo.
+      const lUp = bone(VRMHumanBoneName.LeftUpperArm);
+      const rUp = bone(VRMHumanBoneName.RightUpperArm);
+      if (lUp) lUp.rotation.z = 1.57; // 90 grados, brazos completamente abajo
+      if (rUp) rUp.rotation.z = -1.57;
+      const lLo = bone(VRMHumanBoneName.LeftLowerArm);
+      const rLo = bone(VRMHumanBoneName.RightLowerArm);
+      if (lLo) lLo.rotation.set(0, 0, 0);
+      if (rLo) rLo.rotation.set(0, 0, 0);
+    }
+
+    // ---------------------------------------------------------------------
+    // IK de 2 huesos (hombro -> codo -> muneca) a partir de una posicion XY
+    // normalizada. Ver la nota en lib/avatar_bridge.dart sobre por que solo
+    // hay 2D disponible: se asume que el codo se dobla hacia adelante (uso
+    // tipico al senar de frente a la camara), y se resuelve la profundidad
+    // que falta con la ley de cosenos usando el largo real de los huesos
+    // del avatar.
+    // ---------------------------------------------------------------------
+    function resolverBrazo(lado, hombroLocal, codoObjetivo, munecaObjetivo) {
+      const pre = lado === 'left' ? VRMHumanBoneName.LeftUpperArm : VRMHumanBoneName.RightUpperArm;
+      const med = lado === 'left' ? VRMHumanBoneName.LeftLowerArm : VRMHumanBoneName.RightLowerArm;
+      const upper = bone(pre);
+      const lower = bone(med);
+      if (!upper || !lower) return;
+
+      // Vector hombro->muneca en el plano normalizado (x hacia la derecha
+      // del avatar, y hacia arriba). Z se resuelve abajo.
+      const dx = munecaObjetivo.x - hombroLocal.x;
+      const dy = munecaObjetivo.y - hombroLocal.y;
+
+      const largoSup = 0.28; // proporciones humanas tipicas, en unidades de
+      const largoInf = 0.26; // ancho-de-hombros = 1 (ver avatar_bridge.dart)
+      const largoTotal = largoSup + largoInf;
+
+      let dist = Math.sqrt(dx * dx + dy * dy);
+      dist = Math.min(dist, largoTotal * 0.98); // no estirar mas de lo que da el brazo
+
+      // Ley de cosenos para el angulo del codo.
+      const cosCodo = (largoSup * largoSup + largoInf * largoInf - dist * dist) /
+        (2 * largoSup * largoInf);
+      const anguloCodo = Math.acos(Math.min(1, Math.max(-1, cosCodo)));
+
+      // Angulo del hombro respecto a la vertical, mas el aporte de que el
+      // codo no esta perfectamente en linea.
+      const anguloHombro = Math.atan2(dy, dx) +
+        Math.acos(Math.min(1, Math.max(-1,
+          (largoSup * largoSup + dist * dist - largoInf * largoInf) / (2 * largoSup * dist || 1))));
+
+      const signo = lado === 'left' ? 1 : -1;
+      upper.rotation.set(0.25 * signo, 0, signo * (anguloHombro - Math.PI / 2));
+      lower.rotation.set(0, 0, signo * -(Math.PI - anguloCodo));
+    }
+
+    function moverMano(lado, presente, puntos) {
+      // puntos: 20 landmarks [x,y,z] relativos a la muneca, ya rotados y
+      // escalados por sign_norm.dart. Se usan solo para estimar el "curl"
+      // (que tan cerrado esta cada dedo), no la posicion exacta de cada
+      // falange -- es una aproximacion liviana, no una retarget completa.
+      const dedos = [
+        ['Thumb', [0, 1, 2, 3]],
+        ['Index', [4, 5, 6, 7]],
+        ['Middle', [8, 9, 10, 11]],
+        ['Ring', [12, 13, 14, 15]],
+        ['Little', [16, 17, 18, 19]],
+      ];
+      const fases = ['Proximal', 'Intermediate', 'Distal'];
+
+      for (const [nombreDedo, idx] of dedos) {
+        let curl = 0;
+        if (presente) {
+          // Distancia de la punta del dedo a la muneca (en el espacio ya
+          // normalizado por ancho de mano): dedo estirado = lejos, dedo
+          // cerrado = cerca. Se convierte a un angulo de flexion 0..~1.4rad
+          // por falange, igual para las tres falanges (aproximacion).
+          const punta = puntos[idx[idx.length - 1]];
+          const dist = Math.sqrt(punta[0] * punta[0] + punta[1] * punta[1] + punta[2] * punta[2]);
+          const largoEstirado = nombreDedo === 'Thumb' ? 0.55 : 0.95;
+          curl = Math.max(0, Math.min(1, 1 - dist / largoEstirado));
+        }
+        const flex = curl * 1.3;
+        for (const fase of fases) {
+          const nombreHueso = VRMHumanBoneName[`${lado === 'left' ? 'Left' : 'Right'}${nombreDedo}${fase}`];
+          const h = nombreHueso ? bone(nombreHueso) : null;
+          if (h) h.rotation.z = (lado === 'left' ? -1 : 1) * flex;
+        }
+      }
+    }
+
+    function moverExpresionBasica(t) {
+      // No hay datos faciales grabados (el pipeline de captura solo mira
+      // pose + manos), asi que esto es generico: un parpadeo cada tanto
+      // para que no se sienta un maniqui. Nada de esto viene de la seña.
+      if (!vrm || !vrm.expressionManager) return;
+      const ciclo = (t % 3.6);
+      const parpadeo = ciclo > 3.4 ? (1 - (ciclo - 3.4) / 0.2) : (ciclo > 3.3 ? (ciclo - 3.3) / 0.1 : 0);
+      vrm.expressionManager.setValue('blink', Math.max(0, Math.min(1, parpadeo)));
+    }
+
+    // ---------------------------------------------------------------------
+    // Reproduccion de una secuencia de frames (ver dtw.dart / Template.seq)
+    // ---------------------------------------------------------------------
+    const kOffBody = 0, kOffLocL = 12, kOffLocR = 14, kOffPresL = 16, kOffPresR = 17,
+      kOffShapeL = 18, kOffShapeR = 78;
+
+    let colaFrames = [];
+    let frameActual = 0;
+    let reproduciendo = false;
+    const kFps = 24; // suficiente para que se vea fluido; los datos vienen
+    // a kTFrames=32 muestras por seña y se interpolan igual.
+
+    function frameA3Puntos(v) {
+      const codoI = { x: v[kOffBody + 0], y: v[kOffBody + 1] };
+      const codoD = { x: v[kOffBody + 2], y: v[kOffBody + 3] };
+      const munI = { x: v[kOffLocL], y: v[kOffLocL + 1] };
+      const munD = { x: v[kOffLocR], y: v[kOffLocR + 1] };
+      const presI = v[kOffPresL] >= 0.5;
+      const presD = v[kOffPresR] >= 0.5;
+      const manoI = [];
+      const manoD = [];
+      for (let j = 0; j < 20; j++) {
+        manoI.push([v[kOffShapeL + j * 3], v[kOffShapeL + j * 3 + 1], v[kOffShapeL + j * 3 + 2]]);
+        manoD.push([v[kOffShapeR + j * 3], v[kOffShapeR + j * 3 + 1], v[kOffShapeR + j * 3 + 2]]);
+      }
+      return { codoI, codoD, munI, munD, presI, presD, manoI, manoD };
+    }
+
+    function aplicarFrame(v) {
+      if (!vrm) return;
+      const p = frameA3Puntos(v);
+      // Hombros en el espacio normalizado: por construccion de
+      // sign_norm.dart, el hombro izquierdo esta en (-0.5, 0) y el derecho
+      // en (0.5, 0) -- ver la nota grande de avatar_bridge.dart.
+      resolverBrazo('left', { x: -0.5, y: 0 }, p.codoI, p.munI);
+      resolverBrazo('right', { x: 0.5, y: 0 }, p.codoD, p.munD);
+      moverMano('left', p.presI, p.manoI);
+      moverMano('right', p.presD, p.manoD);
+    }
+
+    window.reproducirSecuencia = function (seqJson) {
+      try {
+        colaFrames = JSON.parse(seqJson);
+      } catch (e) {
+        avisar('secuencia invalida: ' + e);
+        return;
+      }
+      frameActual = 0;
+      reproduciendo = colaFrames.length > 0;
+    };
+
+    let ultimoT = 0;
+    let acumMs = 0;
+    function animar(t) {
+      requestAnimationFrame(animar);
+      const dt = ultimoT ? t - ultimoT : 16;
+      ultimoT = t;
+
+      if (reproduciendo) {
+        acumMs += dt;
+        const msPorFrame = 1000 / kFps;
+        while (acumMs >= msPorFrame && reproduciendo) {
+          acumMs -= msPorFrame;
+          if (frameActual >= colaFrames.length) {
+            reproduciendo = false;
+            posarReposo();
+            if (window.SenasChannel) window.SenasChannel.postMessage('fin');
+            break;
+          }
+          aplicarFrame(colaFrames[frameActual]);
+          frameActual++;
+        }
+      }
+
+      moverExpresionBasica(t / 1000);
+      renderer.render(scene, camera);
+    }
+    requestAnimationFrame(animar);
+  </script>
+</body>
+</html>

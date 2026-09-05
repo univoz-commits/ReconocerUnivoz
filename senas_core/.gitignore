@@ -1,0 +1,39 @@
+# Secretos -- NUNCA subir esto a git
+.env
+*.env
+!.env.example
+
+# Videos originales: son pesados y cada quien los tiene localmente
+# (video_uri en la base apunta a Supabase Storage o al nombre del archivo).
+tools/videos/
+videos/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+*.g.dart
+
+# Android
+android/.gradle/
+android/.kotlin/
+android/app/build/
+android/build/
+android/local.properties
+android/app/src/main/assets/*.task
+
+# Modelos de MediaPipe: son pesados (varios MB) y se descargan aparte
+# (ver CORRER.md), no hace falta versionarlos.
+
+# IDE
+.idea/
+*.iml
+.vscode/

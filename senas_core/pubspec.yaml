@@ -1,0 +1,54 @@
+name: senas_core
+description: App de traducción de señas con MediaPipe y PostgreSQL.
+version: 1.0.0
+publish_to: none
+
+environment:
+  sdk: ^3.0.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  permission_handler: ^11.3.1
+  # Carpeta propia de la app donde viven las muestras grabadas en el
+  # telefono (muestras_locales.dart).
+  path_provider: ^2.1.0
+  # Pin a proposito: path_provider_android 2.3.x pasa a implementarse con
+  # JNI, lo que arrastra los paquetes jni/jni_flutter y obliga a compilar
+  # codigo nativo con CMake y NDK. En Windows eso falla con
+  # "el proceso no tiene acceso al archivo" (bloqueo del antivirus sobre
+  # .cxx/) y ademas agrega minutos a cada build. La 2.2.x hace exactamente
+  # lo mismo -- devolver la ruta de la carpeta de la app -- en Kotlin puro.
+  path_provider_android: '>=2.2.1 <2.3.0'
+  # Compartir el archivo exportado de muestras para importarlo en la PC.
+  share_plus: ^7.2.2
+  # Acceso directo a Supabase por su API REST (supabase_api.dart). Se usa
+  # http pelado en vez del paquete supabase_flutter: de todo ese paquete
+  # solo necesitariamos cuatro pedidos HTTP.
+  http: ^1.2.0
+  # sha1, para generar el mismo UUID de firmante que ingest_video.py.
+  crypto: ^3.0.3
+  # Texto a voz para decir la seña reconocida en voz alta (lib/voz.dart).
+  # Usa el motor de TTS que ya trae el sistema operativo -- no descarga
+  # voces nuevas ni necesita red.
+  flutter_tts: ^4.2.0
+  # WebView para el visor del avatar 3D (lib/avatar_bridge.dart,
+  # lib/pantalla_avatar.dart). El motor de animacion VRM (three.js +
+  # three-vrm) corre como pagina local en assets/avatar_viewer/; Dart le
+  # manda las secuencias de landmarks ya normalizadas por JavaScript.
+  webview_flutter: ^4.8.0
+  # Reconocimiento de voz para "decir la palabra y que el avatar la senale"
+  # (pantalla_avatar.dart). Usa el motor de STT del sistema operativo.
+  speech_to_text: ^7.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  test: ^1.25.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/plantillas.json
+    - assets/avatar/
+    - assets/avatar_viewer/
