@@ -153,28 +153,90 @@
       return vrm ? vrm.humanoid.getNormalizedBoneNode(nombre) : null;
     }
 
+    // Cuanto se bajan los brazos desde T-pose, en radianes. 1.57 seria
+    // pegados al torso; se deja un poco menos para que el IK tenga margen
+    // de maniobra sin que las manos atraviesen el cuerpo.
+    const kAnguloReposo = 1.40;
+
+    // Inclinacion del plano en que barre cada brazo, en radianes. Como el
+    // cuerpo se guarda en 2D (sign_norm.dart descarta la Z de MediaPipe Pose
+    // por ruidosa), esto es lo UNICO que decide si las manos pasan por
+    // delante del torso o por detras.
+    //
+    // Va SEPARADO por brazo porque asi quedo la calibracion, aunque los dos
+    // valores resultaron simetricos: la inclinacion SI se espeja entre
+    // brazos. El error de las primeras versiones no era el signo sino la
+    // magnitud -- se empezo en 0.25 rad (14 grados) cuando hacian falta unos
+    // 60.
+    //
+    // Calibrado a mano en el Huawei GFY LX1 con sliders en vivo: +1.05 /
+    // -1.05. Si hay que recalibrar en otro modelo o con otro rig, la forma
+    // rapida es volver a poner dos <input type="range"> que escriban aqui;
+    // deducir el valor leyendo el codigo no funciono.
+    const inclinacion = { left: 1.05, right: -1.05 };
+
+    // Permite fijar los valores desde Dart si alguna vez se quiere exponer
+    // la calibracion en la UI de la app.
+    window.ajustarInclinacion = function (izq, der) {
+      inclinacion.left = Number(izq);
+      inclinacion.right = Number(der);
+    };
+
+    // Que brazos anima el visor. Muchas senas de LSM son de una sola mano;
+    // forzar la otra a seguir landmarks que no existen la hace temblar sin
+    // sentido. El brazo desactivado se queda en reposo, a un costado.
+    // Lo controla Dart via window.configurarManos() (avatar_bridge.dart).
+    const manosActivas = { left: true, right: true };
+
+    window.configurarManos = function (izquierda, derecha) {
+      manosActivas.left = !!izquierda;
+      manosActivas.right = !!derecha;
+      if (!manosActivas.left) posarReposoBrazo('left');
+      if (!manosActivas.right) posarReposoBrazo('right');
+    };
+
+    // Deja UN brazo colgando a un costado. Los signos estan verificados en
+    // el dispositivo: ver la nota larga de mas abajo.
+    function posarReposoBrazo(lado) {
+      const signo = lado === 'left' ? 1 : -1;
+      const up = bone(lado === 'left' ? VRMHumanBoneName.LeftUpperArm : VRMHumanBoneName.RightUpperArm);
+      const lo = bone(lado === 'left' ? VRMHumanBoneName.LeftLowerArm : VRMHumanBoneName.RightLowerArm);
+      if (up) up.rotation.set(0, 0, signo * kAnguloReposo);
+      if (lo) lo.rotation.set(0, 0, 0);
+      // Manos abiertas y relajadas.
+      moverMano(lado, false, null);
+    }
+
     function posarReposo() {
       // Para este rig, rotation 0 en los huesos normalizados es el T-pose
       // (brazos horizontales) -- no la pose de reposo. Hay que rotar cada
       // brazo casi 90 grados desde ahi para que caiga a los costados del
       // cuerpo.
-      const lUp = bone(VRMHumanBoneName.LeftUpperArm);
-      const rUp = bone(VRMHumanBoneName.RightUpperArm);
-      if (lUp) lUp.rotation.z = 1.57; // 90 grados, brazos completamente abajo
-      if (rUp) rUp.rotation.z = -1.57;
-      const lLo = bone(VRMHumanBoneName.LeftLowerArm);
-      const rLo = bone(VRMHumanBoneName.RightLowerArm);
-      if (lLo) lLo.rotation.set(0, 0, 0);
-      if (rLo) rLo.rotation.set(0, 0, 0);
+      //
+      // Los signos: en VRM el eje +X apunta hacia la izquierda del
+      // personaje, pero -- verificado en el dispositivo con este rig -- la
+      // rotacion positiva sobre +Z es la que BAJA el brazo izquierdo. El
+      // derecho, al apuntar a -X, necesita el signo opuesto. No cambiar
+      // estos signos sin volver a probar en el telefono: la primera vez
+      // salieron los dos brazos hacia arriba.
+      posarReposoBrazo('left');
+      posarReposoBrazo('right');
     }
 
     // ---------------------------------------------------------------------
-    // IK de 2 huesos (hombro -> codo -> muneca) a partir de una posicion XY
-    // normalizada. Ver la nota en lib/avatar_bridge.dart sobre por que solo
-    // hay 2D disponible: se asume que el codo se dobla hacia adelante (uso
-    // tipico al senar de frente a la camara), y se resuelve la profundidad
-    // que falta con la ley de cosenos usando el largo real de los huesos
-    // del avatar.
+    // Orientacion del brazo a partir de las posiciones de codo y muneca que
+    // ya vienen en el frame. Antes esto era un IK de 2 huesos que ignoraba
+    // codoObjetivo y reconstruia el codo con ley de cosenos y proporciones
+    // humanas supuestas -- innecesario, porque sign_norm.dart guarda el codo
+    // real en kOffBody. Ahora cada hueso se orienta con su propio segmento:
+    // el brazo mira hacia el codo, el antebrazo hacia la muneca.
+    //
+    // Sobre los ejes: el espacio de la seña tiene +x del hombro izquierdo al
+    // derecho (o sea hacia la DERECHA del avatar), mientras que la rotacion
+    // del brazo izquierdo crece hacia abajo con signo positivo -- ver la
+    // nota de posarReposo(), verificada en el dispositivo. De ahi el
+    // -signo*dx y el -dy de anguloBrazo(). Chequeo mental: con el codo justo
+    // debajo del hombro (dx=0, dy<0) sale +PI/2, que es la pose de reposo.
     // ---------------------------------------------------------------------
     function resolverBrazo(lado, hombroLocal, codoObjetivo, munecaObjetivo) {
       const pre = lado === 'left' ? VRMHumanBoneName.LeftUpperArm : VRMHumanBoneName.RightUpperArm;
@@ -183,33 +245,47 @@
       const lower = bone(med);
       if (!upper || !lower) return;
 
-      // Vector hombro->muneca en el plano normalizado (x hacia la derecha
-      // del avatar, y hacia arriba). Z se resuelve abajo.
-      const dx = munecaObjetivo.x - hombroLocal.x;
-      const dy = munecaObjetivo.y - hombroLocal.y;
-
-      const largoSup = 0.28; // proporciones humanas tipicas, en unidades de
-      const largoInf = 0.26; // ancho-de-hombros = 1 (ver avatar_bridge.dart)
-      const largoTotal = largoSup + largoInf;
-
-      let dist = Math.sqrt(dx * dx + dy * dy);
-      dist = Math.min(dist, largoTotal * 0.98); // no estirar mas de lo que da el brazo
-
-      // Ley de cosenos para el angulo del codo.
-      const cosCodo = (largoSup * largoSup + largoInf * largoInf - dist * dist) /
-        (2 * largoSup * largoInf);
-      const anguloCodo = Math.acos(Math.min(1, Math.max(-1, cosCodo)));
-
-      // Angulo del hombro respecto a la vertical, mas el aporte de que el
-      // codo no esta perfectamente en linea.
-      const anguloHombro = Math.atan2(dy, dx) +
-        Math.acos(Math.min(1, Math.max(-1,
-          (largoSup * largoSup + dist * dist - largoInf * largoInf) / (2 * largoSup * dist || 1))));
-
       const signo = lado === 'left' ? 1 : -1;
-      upper.rotation.set(0.25 * signo, 0, signo * (anguloHombro - Math.PI / 2));
-      lower.rotation.set(0, 0, signo * -(Math.PI - anguloCodo));
+
+      // Convierte un segmento del espacio de la seña al angulo de rotacion
+      // sobre Z que le corresponde a ese lado. Devuelve null si el segmento
+      // es demasiado corto para tener direccion confiable (frames sin datos
+      // de cuerpo, o landmarks en cero): en ese caso no se toca el hueso y
+      // se queda como estaba, en vez de saltar a la horizontal.
+      function anguloBrazo(dx, dy) {
+        if (Math.sqrt(dx * dx + dy * dy) < 0.02) return null;
+        return Math.atan2(-dy, -signo * dx);
+      }
+
+      const angHombro = anguloBrazo(
+        codoObjetivo.x - hombroLocal.x, codoObjetivo.y - hombroLocal.y);
+      const angAntebrazo = anguloBrazo(
+        munecaObjetivo.x - codoObjetivo.x, munecaObjetivo.y - codoObjetivo.y);
+      if (angHombro === null) return;
+
+      // Ver 'inclinacion': sin Z en el cuerpo, este valor es el que pone la
+      // mano delante del torso o detras. Se calibra por brazo con el panel
+      // de ajustes.
+      upper.rotation.set(inclinacion[lado], 0, signo * angHombro);
+      // El antebrazo hereda la rotacion del brazo, asi que su angulo local es
+      // la diferencia entre ambos segmentos.
+      if (angAntebrazo !== null) {
+        lower.rotation.set(0, 0, signo * (angAntebrazo - angHombro));
+      }
     }
+
+    // Los cuatro dedos largos van Proximal -> Intermediate -> Distal en
+    // las dos versiones del spec. El pulgar NO: three-vrm v2 expone los
+    // huesos con la nomenclatura de VRM 1.0, donde el pulgar es
+    // Metacarpal -> Proximal -> Distal y no existe "ThumbIntermediate".
+    // Con la lista generica, ese nombre resolvia a undefined y el
+    // metacarpiano -- el hueso que abre y cierra la pinza -- se quedaba
+    // quieto. Se detecta en tiempo de carga para no depender de la
+    // version exacta de la libreria que sirva el CDN.
+    const kFasesGenericas = ['Proximal', 'Intermediate', 'Distal'];
+    const kFasesPulgar = VRMHumanBoneName.LeftThumbMetacarpal
+      ? ['Metacarpal', 'Proximal', 'Distal']
+      : kFasesGenericas;
 
     function moverMano(lado, presente, puntos) {
       // puntos: 20 landmarks [x,y,z] relativos a la muneca, ya rotados y
@@ -223,7 +299,6 @@
         ['Ring', [12, 13, 14, 15]],
         ['Little', [16, 17, 18, 19]],
       ];
-      const fases = ['Proximal', 'Intermediate', 'Distal'];
 
       for (const [nombreDedo, idx] of dedos) {
         let curl = 0;
@@ -238,7 +313,7 @@
           curl = Math.max(0, Math.min(1, 1 - dist / largoEstirado));
         }
         const flex = curl * 1.3;
-        for (const fase of fases) {
+        for (const fase of (nombreDedo === 'Thumb' ? kFasesPulgar : kFasesGenericas)) {
           const nombreHueso = VRMHumanBoneName[`${lado === 'left' ? 'Left' : 'Right'}${nombreDedo}${fase}`];
           const h = nombreHueso ? bone(nombreHueso) : null;
           if (h) h.rotation.z = (lado === 'left' ? -1 : 1) * flex;
@@ -284,16 +359,39 @@
       return { codoI, codoD, munI, munD, presI, presD, manoI, manoD };
     }
 
+    // Un codo nunca puede estar en el origen: por construccion de
+    // sign_norm.dart, (0,0) es el punto medio entre los hombros. Cuando una
+    // sena es de una sola mano, los landmarks del brazo que no participa
+    // llegan en cero, y ese cero se colaba como una posicion valida --
+    // atan2 daba PI y el brazo terminaba rotado 180 grados, por arriba y
+    // hacia atras. Si el codo cae ahi, el dato no existe y el brazo va a
+    // reposo.
+    function brazoTieneDatos(codo) {
+      return Math.sqrt(codo.x * codo.x + codo.y * codo.y) > 0.05;
+    }
+
     function aplicarFrame(v) {
       if (!vrm) return;
       const p = frameA3Puntos(v);
       // Hombros en el espacio normalizado: por construccion de
       // sign_norm.dart, el hombro izquierdo esta en (-0.5, 0) y el derecho
       // en (0.5, 0) -- ver la nota grande de avatar_bridge.dart.
-      resolverBrazo('left', { x: -0.5, y: 0 }, p.codoI, p.munI);
-      resolverBrazo('right', { x: 0.5, y: 0 }, p.codoD, p.munD);
-      moverMano('left', p.presI, p.manoI);
-      moverMano('right', p.presD, p.manoD);
+      if (manosActivas.left) {
+        if (brazoTieneDatos(p.codoI)) {
+          resolverBrazo('left', { x: -0.5, y: 0 }, p.codoI, p.munI);
+          moverMano('left', p.presI, p.manoI);
+        } else {
+          posarReposoBrazo('left');
+        }
+      }
+      if (manosActivas.right) {
+        if (brazoTieneDatos(p.codoD)) {
+          resolverBrazo('right', { x: 0.5, y: 0 }, p.codoD, p.munD);
+          moverMano('right', p.presD, p.manoD);
+        } else {
+          posarReposoBrazo('right');
+        }
+      }
     }
 
     window.reproducirSecuencia = function (seqJson) {
@@ -331,6 +429,15 @@
       }
 
       moverExpresionBasica(t / 1000);
+      // three-vrm NO aplica solo lo que se escribe en los huesos
+      // normalizados ni en el expressionManager. vrm.update() es lo que
+      // baja las rotaciones al rig real y los valores de expresion a los
+      // morph targets. Sin esta linea el modelo se queda clavado en la
+      // pose de bind (T-pose, brazos en cruz) haga lo que haga el resto
+      // del codigo -- posarReposo, el IK y el parpadeo se escriben pero
+      // nunca se ven. Va despues de aplicarFrame/moverExpresionBasica y
+      // antes de render.
+      if (vrm) vrm.update(dt / 1000);
       renderer.render(scene, camera);
     }
     requestAnimationFrame(animar);

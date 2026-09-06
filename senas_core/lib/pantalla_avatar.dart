@@ -1,5 +1,5 @@
 /// Pantalla del avatar 3D: escribís, elegís de una lista, o hablás una
-/// palabra, y el avatar (assets/avatar/Model_Yuki_N.vrm) hace la seña
+/// palabra, y el avatar (assets/avatar/univozM.vrm) hace la seña
 /// correspondiente. Es el sentido inverso de PantallaDeTranslacion: en vez
 /// de camara -> texto, es texto/voz -> avatar.
 ///
@@ -16,6 +16,11 @@ import 'package:webview_flutter/webview_flutter.dart';
 import 'avatar_bridge.dart';
 import 'dtw.dart';
 import 'plantillas.dart';
+
+/// Que brazos anima el avatar. Izquierda y derecha son las del AVATAR, tal
+/// como las ve quien lo mira de frente invertidas -- igual que al aprender
+/// una seña de un instructor sentado enfrente.
+enum _Manos { ambas, izquierda, derecha }
 
 class PantallaAvatar extends StatefulWidget {
   const PantallaAvatar({super.key});
@@ -34,6 +39,7 @@ class _PantallaAvatarState extends State<PantallaAvatar> {
   bool _reproduciendo = false;
   bool _vozLista = false;
   bool _escuchando = false;
+  _Manos _manos = _Manos.ambas;
   String? _aviso;
 
   @override
@@ -110,6 +116,14 @@ class _PantallaAvatarState extends State<PantallaAvatar> {
       _reproduciendo = true;
     });
     await _bridge.reproducir(t.seq);
+  }
+
+  Future<void> _cambiarManos(_Manos m) async {
+    setState(() => _manos = m);
+    await _bridge.configurarManos(
+      izquierda: m != _Manos.derecha,
+      derecha: m != _Manos.izquierda,
+    );
   }
 
   Future<void> _alternarMicrofono() async {
@@ -225,6 +239,28 @@ class _PantallaAvatarState extends State<PantallaAvatar> {
               child: Text(_aviso!,
                   style: TextStyle(color: Theme.of(context).colorScheme.error)),
             ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Text('Manos:', style: Theme.of(context).textTheme.labelMedium),
+              const SizedBox(width: 8),
+              Expanded(
+                child: SegmentedButton<_Manos>(
+                  segments: const [
+                    ButtonSegment(value: _Manos.ambas, label: Text('Ambas')),
+                    ButtonSegment(value: _Manos.izquierda, label: Text('Izq.')),
+                    ButtonSegment(value: _Manos.derecha, label: Text('Der.')),
+                  ],
+                  selected: {_manos},
+                  showSelectedIcon: false,
+                  style: SegmentedButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  onSelectionChanged: (s) => _cambiarManos(s.first),
+                ),
+              ),
+            ],
+          ),
           const SizedBox(height: 10),
           Text('${_glosasDisponibles.length} señas disponibles',
               style: Theme.of(context).textTheme.labelMedium),

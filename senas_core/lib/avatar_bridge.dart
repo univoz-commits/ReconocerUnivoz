@@ -30,7 +30,10 @@ import 'package:flutter/material.dart' show Color;
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:webview_flutter/webview_flutter.dart';
 
-const String _kRutaAvatar = 'assets/avatar/Model_Yuki_N.vrm';
+// Modelo actual: VRM 0.0 exportado de VRoid Studio 1.22.1. Tiene el mapa
+// humanoide completo (54 huesos, 15 por mano) y los blendshapes de
+// parpadeo y vocales, que es lo minimo que pide LSM.
+const String _kRutaAvatar = 'assets/avatar/univozM.vrm';
 
 class AvatarBridge {
   late final WebViewController controller;
@@ -65,6 +68,17 @@ class AvatarBridge {
     final b64 = base64Encode(
         datos.buffer.asUint8List(datos.offsetInBytes, datos.lengthInBytes));
     await controller.runJavaScript("window.cargarAvatarBase64('$b64')");
+  }
+
+  /// Elige que brazos anima el avatar. Muchas senas de LSM son de una sola
+  /// mano, y forzar la otra a seguir landmarks que no estan presentes la hace
+  /// temblar sin sentido. El brazo desactivado se queda en reposo.
+  ///
+  /// Izquierda y derecha son las del AVATAR, no las de quien mira.
+  Future<void> configurarManos(
+      {bool izquierda = true, bool derecha = true}) async {
+    await controller.runJavaScript(
+        'window.configurarManos($izquierda, $derecha)');
   }
 
   /// Reproduce una secuencia completa (lista de frames de 138 dimensiones
