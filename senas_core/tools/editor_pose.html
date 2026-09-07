@@ -1,0 +1,1279 @@
+<!DOCTYPE html>
+<!--
+  ===========================================================================
+  EDITOR DE POSE DEL AVATAR  --  herramienta de escritorio
+  ===========================================================================
+
+  Esto NO forma parte de la app: es una pagina suelta para abrir en la
+  computadora, con pantalla grande y mouse. Sirve para armar poses a mano,
+  entender por que una sena se ve mal, y sacar los angulos ya corregidos para
+  pegarlos en assets/avatar_viewer/index.html.
+
+  La logica del rig (resolverBrazo, moverMano, orientarMuneca, el objeto
+  'cal') es la MISMA que la del visor de la app. Si se cambia alla, hay que
+  reflejarlo aca, y al reves. Se mantiene duplicada a proposito: el visor de
+  la app tiene que ser un archivo autonomo que Flutter empaqueta como asset,
+  y no vale la pena montar un build para compartir 200 lineas.
+
+  --------------------------------------------------------------------------
+  COMO ABRIRLO
+  --------------------------------------------------------------------------
+  NO sirve hacer doble clic en el archivo. Los navegadores bloquean los
+  modulos ES cuando la pagina viene de file:// (politica de CORS), asi que
+  hace falta servirlo por HTTP. Desde la raiz del proyecto:
+
+      cd D:\univoz\senas_core
+      python -m http.server 8000
+
+  y despues abrir en el navegador:
+
+      http://localhost:8000/tools/editor_pose.html
+
+  El avatar se carga solo desde assets/avatar/. Si se quiere probar otro
+  modelo, el boton "Abrir .vrm" acepta cualquier archivo del disco.
+  Necesita internet la primera vez, para bajar three.js del CDN.
+-->
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>UNIVOZ · Editor de pose</title>
+  <style>
+    :root {
+      --panel: #1e1f26;
+      --panel2: #282a33;
+      --texto: #e8e8ef;
+      --tenue: #9a9aa8;
+      --acento: #5c6bc0;
+      --borde: #3a3c47;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; height: 100%; overflow: hidden;
+      font: 13px/1.45 system-ui, sans-serif; color: var(--texto);
+      background: #14151a;
+    }
+    #todo { display: flex; height: 100%; }
+    #escena { flex: 1; position: relative; min-width: 0; }
+    #lienzo { width: 100%; height: 100%; display: block; }
+
+    #pista {
+      position: absolute; left: 12px; bottom: 12px;
+      color: var(--tenue); font-size: 12px; pointer-events: none;
+    }
+    #error {
+      position: absolute; left: 12px; top: 12px; max-width: 60%;
+      background: #b3261e; color: #fff; padding: 8px 12px;
+      border-radius: 6px; display: none; white-space: pre-wrap;
+    }
+
+    #lateral {
+      width: 340px; background: var(--panel); border-left: 1px solid var(--borde);
+      display: flex; flex-direction: column; overflow: hidden;
+    }
+    #lateral header {
+      padding: 12px 14px; border-bottom: 1px solid var(--borde);
+      display: flex; align-items: center; gap: 8px;
+    }
+    #lateral header h1 { font-size: 14px; margin: 0; flex: 1; font-weight: 600; }
+
+    .pestanas { display: flex; border-bottom: 1px solid var(--borde); }
+    .pestanas button {
+      flex: 1; background: none; border: 0; color: var(--tenue);
+      padding: 9px 0; cursor: pointer; font-size: 12px;
+      border-bottom: 2px solid transparent;
+    }
+    .pestanas button.activa { color: var(--texto); border-bottom-color: var(--acento); }
+
+    .hoja { padding: 12px 14px; overflow-y: auto; flex: 1; }
+    .hoja.escondida { display: none; }
+
+    label.campo { display: block; margin: 10px 0 3px; color: var(--tenue); font-size: 12px; }
+    label.campo span { float: right; color: var(--texto); font-variant-numeric: tabular-nums; }
+
+    select, input[type=text], textarea {
+      width: 100%; background: var(--panel2); color: var(--texto);
+      border: 1px solid var(--borde); border-radius: 5px; padding: 6px 8px;
+      font: inherit;
+    }
+    textarea { font: 11px/1.4 ui-monospace, monospace; resize: vertical; }
+    input[type=range] { width: 100%; margin: 2px 0; accent-color: var(--acento); }
+
+    .botones { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+    button.bot {
+      flex: 1; min-width: 84px; background: var(--panel2); color: var(--texto);
+      border: 1px solid var(--borde); border-radius: 5px; padding: 7px 6px;
+      cursor: pointer; font-size: 12px;
+    }
+    button.bot:hover { background: #33353f; }
+    button.bot.primario { background: var(--acento); border-color: var(--acento); }
+    button.bot.activo { background: #7a3030; border-color: #9a4040; }
+
+    .nota {
+      color: var(--tenue); font-size: 11px; margin-top: 12px;
+      padding-top: 10px; border-top: 1px solid var(--borde);
+    }
+    .grupo { margin-bottom: 4px; }
+    h2.sec {
+      font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+      color: var(--tenue); margin: 16px 0 4px; font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+<div id="todo">
+  <div id="escena">
+    <canvas id="lienzo"></canvas>
+    <div id="error"></div>
+    <div id="pista">Arrastrar: girar · Rueda: acercar · Clic derecho: desplazar</div>
+  </div>
+
+  <aside id="lateral">
+    <header>
+      <h1>Editor de pose</h1>
+      <button class="bot" id="btnAbrir" style="flex:0 0 auto">Abrir .vrm</button>
+      <input type="file" id="archivo" accept=".vrm,.glb" hidden />
+    </header>
+
+    <div class="pestanas">
+      <button data-hoja="huesos" class="activa">Huesos</button>
+      <button data-hoja="calib">Calibración</button>
+      <button data-hoja="camara">Cámara</button>
+      <button data-hoja="datos">Datos</button>
+    </div>
+
+    <!-- ================= HUESOS ================= -->
+    <div class="hoja" id="hojaHuesos">
+      <label class="campo">Hueso</label>
+      <select id="selHueso"></select>
+
+      <label class="campo">Inclinación X <span id="valX">0.00</span></label>
+      <input type="range" id="rotX" min="-3.15" max="3.15" step="0.01" />
+      <label class="campo">Giro Y <span id="valY">0.00</span></label>
+      <input type="range" id="rotY" min="-3.15" max="3.15" step="0.01" />
+      <label class="campo">Doblez Z <span id="valZ">0.00</span></label>
+      <input type="range" id="rotZ" min="-3.15" max="3.15" step="0.01" />
+
+      <div class="botones">
+        <button class="bot" id="btnCeroHueso">Poner en cero</button>
+        <button class="bot" id="btnEspejar">Espejar al otro lado</button>
+      </div>
+      <div class="botones">
+        <button class="bot" id="btnReposo">Pose de reposo</button>
+        <button class="bot" id="btnCeroTodo">Cero todos</button>
+      </div>
+
+      <p class="nota">
+        Cero en todos los huesos es la postura en cruz (T), no los brazos
+        abajo. La pose de reposo se construye rotando los brazos desde ahí.
+      </p>
+    </div>
+
+    <!-- ================= CALIBRACIÓN ================= -->
+    <div class="hoja escondida" id="hojaCalib">
+      <div class="botones">
+        <button class="bot" data-lado="left">Brazo izquierdo</button>
+        <button class="bot" data-lado="right">Brazo derecho</button>
+      </div>
+
+      <label class="campo">Profundidad del brazo <span id="valProf">0.00</span></label>
+      <input type="range" id="rProf" min="-1.6" max="1.6" step="0.01" />
+
+      <label class="campo">Cero del giro de palma <span id="valPalma">0.00</span></label>
+      <input type="range" id="rPalma" min="-3.15" max="3.15" step="0.01" />
+
+      <label class="campo">Altura de reposo (ambos brazos) <span id="valReposo">0.00</span></label>
+      <input type="range" id="rReposo" min="0" max="1.6" step="0.01" />
+
+      <h2 class="sec">Sentidos invertibles</h2>
+      <div class="botones">
+        <button class="bot" id="invBrazo">Brazo <span id="sgBrazo">+</span></button>
+        <button class="bot" id="invDedos">Dedos <span id="sgDedos">+</span></button>
+        <button class="bot" id="invPalma">Palma <span id="sgPalma">+</span></button>
+      </div>
+
+      <p class="nota">
+        La profundidad es lo único que decide si la mano pasa por delante o
+        por detrás del torso: el cuerpo se guarda en 2D y esa constante
+        reemplaza a la coordenada que falta.
+      </p>
+    </div>
+
+    <!-- ================= CÁMARA ================= -->
+    <div class="hoja escondida" id="hojaCamara">
+      <video id="video" playsinline muted
+             style="width:100%; border-radius:6px; background:#000; transform:scaleX(-1)"></video>
+      <div class="botones">
+        <button class="bot primario" id="btnCamara">Encender cámara</button>
+      </div>
+      <div class="botones">
+        <button class="bot" id="btnCruzar">Cruzar manos: no</button>
+      </div>
+      <div id="estadoCam" style="margin-top:10px; font-size:12px; color:var(--tenue); white-space:pre-line">
+        Cámara apagada.
+      </div>
+      <p class="nota">
+        Hacé la seña vos, congelá en el momento justo con el botón de abajo, y
+        girá la vista para revisarla. Es la forma más rápida de saber si un
+        error es del dato o del render: si tu pose se ve bien en el avatar, el
+        visor está bien y el problema está en la plantilla.
+        <br><br>
+        Si las manos salen intercambiadas, usá "Cruzar manos" -- es el mismo
+        ajuste que existe en la app.
+      </p>
+    </div>
+
+    <!-- ================= DATOS ================= -->
+    <div class="hoja escondida" id="hojaDatos">
+      <label class="campo">Frame o secuencia (138 números por frame)</label>
+      <textarea id="entradaDatos" rows="7" placeholder="Pegar aquí un frame [..] o una secuencia [[..],[..]]"></textarea>
+      <div class="botones">
+        <button class="bot" id="btnAplicarDatos">Aplicar</button>
+        <button class="bot" id="btnReproducir">Reproducir</button>
+      </div>
+      <p class="nota">
+        Sirve para inspeccionar una plantilla real: pegá una secuencia de
+        plantillas.json y mirala cuadro por cuadro desde cualquier ángulo.
+        Al aplicar datos se descongela el modo manual.
+      </p>
+    </div>
+
+    <div style="padding:12px 14px; border-top:1px solid var(--borde)">
+      <div class="botones">
+        <button class="bot primario" id="btnGuardar">Guardar pose</button>
+        <button class="bot" id="btnCongelar">Congelar datos</button>
+      </div>
+      <div class="botones">
+        <button class="bot" id="btnCopiar">Copiar valores al portapapeles</button>
+      </div>
+      <textarea id="salida" rows="6" readonly style="margin-top:8px; display:none"></textarea>
+    </div>
+  </aside>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+    "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@2/lib/three-vrm.module.min.js"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { VRMLoaderPlugin, VRMUtils, VRMHumanBoneName } from '@pixiv/three-vrm';
+
+const $ = (id) => document.getElementById(id);
+const $error = $('error');
+function avisar(msg) { console.error(msg); $error.textContent = msg; $error.style.display = 'block'; }
+
+// ===========================================================================
+// Nombres en español
+// ===========================================================================
+// Los huesos del spec VRM vienen en inglés y en camelCase (leftIndexProximal).
+// Se traducen partiendo el nombre, no con una tabla de 54 entradas: así un
+// modelo con huesos extra tampoco queda sin etiqueta.
+const kLado = { left: 'izq.', right: 'der.' };
+const kDedo = {
+  thumb: 'Pulgar', index: 'Índice', middle: 'Medio',
+  ring: 'Anular', little: 'Meñique',
+};
+const kFalange = {
+  metacarpal: 'metacarpo', proximal: 'proximal',
+  intermediate: 'media', distal: 'distal',
+};
+const kParte = {
+  hips: 'Cadera', spine: 'Columna', chest: 'Pecho', upperchest: 'Pecho alto',
+  neck: 'Cuello', head: 'Cabeza', jaw: 'Mandíbula', eye: 'Ojo',
+  shoulder: 'Hombro', upperarm: 'Brazo', lowerarm: 'Antebrazo', hand: 'Mano',
+  upperleg: 'Muslo', lowerleg: 'Pierna', foot: 'Pie', toes: 'Dedos del pie',
+};
+
+function etiquetaHueso(nombre) {
+  // Separa camelCase: leftIndexProximal -> ['left','Index','Proximal']
+  const partes = nombre.replace(/([A-Z])/g, ' $1').trim().split(' ');
+  let lado = '';
+  if (partes[0] === 'left' || partes[0] === 'right') {
+    lado = ' ' + kLado[partes.shift()];
+  }
+  const resto = partes.join('').toLowerCase();
+
+  for (const [clave, esp] of Object.entries(kDedo)) {
+    if (resto.startsWith(clave)) {
+      const fase = kFalange[resto.slice(clave.length)] || resto.slice(clave.length);
+      return `${esp}${lado} · ${fase}`;
+    }
+  }
+  return (kParte[resto] || nombre) + lado;
+}
+
+// ===========================================================================
+// Escena
+// ===========================================================================
+const lienzo = $('lienzo');
+const renderer = new THREE.WebGLRenderer({
+  canvas: lienzo, antialias: true,
+  // Necesario para poder sacarle una captura al viewport con toDataURL:
+  // sin esto el buffer se descarta despues de dibujar y la imagen sale
+  // negra. Cuesta algo de memoria, irrelevante en una herramienta.
+  preserveDrawingBuffer: true,
+});
+renderer.setPixelRatio(window.devicePixelRatio || 1);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x14151a);
+
+const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 30);
+camera.position.set(0, 1.25, 1.6);
+
+const orbita = new OrbitControls(camera, renderer.domElement);
+orbita.target.set(0, 1.15, 0);
+orbita.enableDamping = true;
+orbita.dampingFactor = 0.1;
+orbita.update();
+
+scene.add(new THREE.AmbientLight(0xffffff, 1.0));
+const luz = new THREE.DirectionalLight(0xffffff, 1.0);
+luz.position.set(1, 2, 1.5);
+scene.add(luz);
+// Rejilla de piso: da referencia de profundidad. Sin ella es dificil juzgar
+// si una mano esta delante o detras, que es justo lo que hay que juzgar.
+scene.add(new THREE.GridHelper(4, 16, 0x444852, 0x2a2d36));
+
+function ajustarTamano() {
+  const c = $('escena');
+  renderer.setSize(c.clientWidth, c.clientHeight, false);
+  camera.aspect = c.clientWidth / c.clientHeight;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', ajustarTamano);
+
+// ===========================================================================
+// Calibración -- espejo exacto del objeto 'cal' de assets/avatar_viewer
+// ===========================================================================
+const cal = {
+  reposo: 1.40,
+  // Giro de muneca APAGADO: orientarMuneca da resultados no simetricos ante
+  // poses simetricas (53 grados en una mano y 155 en la otra con las dos
+  // palmas al frente). El calculo esta mal, no descalibrado.
+  usarMuneca: false,
+  left:  { prof:  1.05, zInv: 1, dedos:  1, palmaInv: 1, palmaOff: 0 },
+  right: { prof: -1.22, zInv: 1, dedos: -1, palmaInv: 1, palmaOff: 0 },
+};
+
+let vrm = null;
+let modoManual = true;   // arranca congelado: aca se viene a posar a mano
+let ladoSel = 'right';
+let huesoSel = null;
+
+function hueso(n) { return vrm ? vrm.humanoid.getNormalizedBoneNode(n) : null; }
+
+// ===========================================================================
+// Rig: mismas funciones que el visor de la app
+// ===========================================================================
+const kFasesGenericas = ['Proximal', 'Intermediate', 'Distal'];
+const kFasesPulgar = VRMHumanBoneName.LeftThumbMetacarpal
+  ? ['Metacarpal', 'Proximal', 'Distal'] : kFasesGenericas;
+const kIdxIndiceMcp = 4, kIdxMedioMcp = 8, kIdxMeniqueMcp = 16;
+
+const _largo = (v) => Math.sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
+const _norm = (v) => { const m = _largo(v) || 1; return [v[0]/m, v[1]/m, v[2]/m]; };
+const _cruz = (a, b) => [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+const _pto = (a, b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+const _resta = (a, b) => [a[0]-b[0], a[1]-b[1], a[2]-b[2]];
+const _escala = (a, k) => [a[0]*k, a[1]*k, a[2]*k];
+const _angulo = (u, v) => Math.acos(Math.max(-1, Math.min(1, _pto(_norm(u), _norm(v)))));
+
+function posarReposoBrazo(lado) {
+  const signo = (lado === 'left' ? 1 : -1) * cal[lado].zInv;
+  const up = hueso(lado === 'left' ? VRMHumanBoneName.LeftUpperArm : VRMHumanBoneName.RightUpperArm);
+  const lo = hueso(lado === 'left' ? VRMHumanBoneName.LeftLowerArm : VRMHumanBoneName.RightLowerArm);
+  if (up) up.rotation.set(0, 0, signo * cal.reposo);
+  if (lo) lo.rotation.set(0, 0, 0);
+  moverMano(lado, false, null);
+  orientarMuneca(lado, false, null);
+}
+function posarReposo() { posarReposoBrazo('left'); posarReposoBrazo('right'); }
+
+// Resuelve el brazo en 3D a partir de los puntos ya normalizados. Desde
+// sign_norm 2.0.0 el cuerpo trae profundidad, asi que no hace falta la
+// constante cal.prof ni recortar el codo: la direccion de cada segmento se
+// traslada de la base del cuerpo de la persona a la del avatar.
+function resolverBrazo(lado, base, hombro, codo, muneca) {
+  const vUp = codo.clone().sub(hombro);
+  const vLo = muneca.clone().sub(codo);
+  if (vUp.length() < 1e-4) return;
+  resolverBrazo3D(lado,
+    aBaseAvatar(vUp.normalize(), base.pDer, base.pArr, base.pFre),
+    vLo.length() < 1e-4 ? null
+      : aBaseAvatar(vLo.normalize(), base.pDer, base.pArr, base.pFre));
+}
+
+function moverMano(lado, presente, puntos) {
+  const dedos = [
+    ['Thumb', [0,1,2,3]], ['Index', [4,5,6,7]], ['Middle', [8,9,10,11]],
+    ['Ring', [12,13,14,15]], ['Little', [16,17,18,19]],
+  ];
+  for (const [nombre, idx] of dedos) {
+    const fases = nombre === 'Thumb' ? kFasesPulgar : kFasesGenericas;
+    let flex = [0, 0, 0];
+    if (presente && puntos) {
+      const n0 = puntos[idx[0]], a = puntos[idx[1]], b = puntos[idx[2]], c = puntos[idx[3]];
+      const s1 = _resta(a, n0), s2 = _resta(b, a), s3 = _resta(c, b);
+      if (_largo(n0) > 1e-5 && _largo(s1) > 1e-5 && _largo(s2) > 1e-5 && _largo(s3) > 1e-5) {
+        flex = [_angulo(n0, s1), _angulo(s1, s2), _angulo(s2, s3)].map((x) => Math.min(1.6, x));
+      }
+    }
+    for (let i = 0; i < fases.length; i++) {
+      const nb = VRMHumanBoneName[`${lado === 'left' ? 'Left' : 'Right'}${nombre}${fases[i]}`];
+      const h = nb ? hueso(nb) : null;
+      if (h) h.rotation.z = cal[lado].dedos * flex[i];
+    }
+  }
+}
+
+function orientarMuneca(lado, presente, puntos) {
+  const mano = hueso(lado === 'left' ? VRMHumanBoneName.LeftHand : VRMHumanBoneName.RightHand);
+  if (!mano) return;
+  if (!cal.usarMuneca || !presente || !puntos) { mano.rotation.set(0, 0, 0); return; }
+  const f = _norm(puntos[kIdxMedioMcp]);
+  let n = _cruz(puntos[kIdxIndiceMcp], puntos[kIdxMeniqueMcp]);
+  if (_largo(n) < 1e-4) return;
+  n = _norm(n);
+  let ref = _resta([0,1,0], _escala(f, _pto([0,1,0], f)));
+  if (_largo(ref) < 1e-3) return;
+  ref = _norm(ref);
+  const bi = _cruz(f, ref);
+  const np = _norm(_resta(n, _escala(f, _pto(n, f))));
+  const giro = Math.atan2(_pto(np, bi), _pto(np, ref));
+  mano.rotation.set(cal[lado].palmaInv * (giro + cal[lado].palmaOff), 0, 0);
+}
+
+// --- lectura de un frame de 152 dimensiones (igual que sign_norm.dart) ----
+// Version 2.0.0: el cuerpo son 8 puntos x (x, y, z).
+const kOffBody = 0, kOffLocL = 24, kOffLocR = 27, kOffPresL = 30,
+      kOffPresR = 31, kOffShapeL = 32, kOffShapeR = 92;
+const kPtHombroI = 0, kPtHombroD = 1, kPtCodoI = 2, kPtCodoD = 3,
+      kPtMunI = 4, kPtMunD = 5, kPtCaderaI = 6, kPtCaderaD = 7;
+
+function frameA3Puntos(v) {
+  const pt = (i) => new THREE.Vector3(
+    v[kOffBody + i * 3], v[kOffBody + i * 3 + 1], v[kOffBody + i * 3 + 2]);
+  const manoI = [], manoD = [];
+  for (let j = 0; j < 20; j++) {
+    manoI.push([v[kOffShapeL+j*3], v[kOffShapeL+j*3+1], v[kOffShapeL+j*3+2]]);
+    manoD.push([v[kOffShapeR+j*3], v[kOffShapeR+j*3+1], v[kOffShapeR+j*3+2]]);
+  }
+  const presI = v[kOffPresL] >= 0.5, presD = v[kOffPresR] >= 0.5;
+  // Muneca: la del detector de manos si esta, si no la del modelo de pose.
+  // La del detector llega en cero cuando esa mano no se vio, y el cero es el
+  // centro entre los hombros.
+  return {
+    hombroI: pt(kPtHombroI), hombroD: pt(kPtHombroD),
+    codoI: pt(kPtCodoI), codoD: pt(kPtCodoD),
+    caderaI: pt(kPtCaderaI), caderaD: pt(kPtCaderaD),
+    munI: presI ? new THREE.Vector3(v[kOffLocL], v[kOffLocL+1], v[kOffLocL+2]) : pt(kPtMunI),
+    munD: presD ? new THREE.Vector3(v[kOffLocR], v[kOffLocR+1], v[kOffLocR+2]) : pt(kPtMunD),
+    presI, presD, manoI, manoD,
+  };
+}
+const tieneDatos = (c) => Math.sqrt(c.x*c.x + c.y*c.y) > 0.05;
+
+// Base del cuerpo. Desde sign_norm 2.0.0 el bloque de cuerpo YA viene
+// proyectado sobre los ejes de la persona: +X a su derecha, +Y arriba, +Z al
+// frente. No hay nada que deducir, la base es la identidad.
+//
+// No volver a calcularla de los hombros y caderas: daria +Z hacia atras y el
+// avatar senaria en espejo de profundidad.
+const kBase = {
+  pDer: new THREE.Vector3(1, 0, 0),
+  pArr: new THREE.Vector3(0, 1, 0),
+  pFre: new THREE.Vector3(0, 0, 1),
+};
+function baseCuerpo(p) {
+  return (Math.abs(p.hombroD.x - p.hombroI.x) > 1e-4) ? kBase : null;
+}
+
+function aplicarFrame(v) {
+  if (!vrm) return;
+  const p = frameA3Puntos(v);
+  const base = baseCuerpo(p);
+  if (base && tieneDatos(p.codoI)) {
+    resolverBrazo('left', base, p.hombroI, p.codoI, p.munI);
+    moverMano('left', p.presI, p.manoI);
+    orientarMuneca('left', p.presI, p.manoI);
+  } else posarReposoBrazo('left');
+  if (base && tieneDatos(p.codoD)) {
+    resolverBrazo('right', base, p.hombroD, p.codoD, p.munD);
+    moverMano('right', p.presD, p.manoD);
+    orientarMuneca('right', p.presD, p.manoD);
+  } else posarReposoBrazo('right');
+}
+
+// ===========================================================================
+// Carga del modelo
+// ===========================================================================
+const loader = new GLTFLoader();
+loader.register((p) => new VRMLoaderPlugin(p));
+
+function alCargar(gltf) {
+  if (vrm) scene.remove(vrm.scene);
+  vrm = gltf.userData.vrm;
+  VRMUtils.removeUnnecessaryVertices(gltf.scene);
+  VRMUtils.removeUnnecessaryJoints(gltf.scene);
+  vrm.scene.rotation.y = Math.PI;
+  scene.add(vrm.scene);
+  // Antes de posar: mide las direcciones de reposo del rig con todo en cero.
+  medirRig();
+  posarReposo();
+  llenarHuesos();
+  $error.style.display = 'none';
+}
+
+function cargarBuffer(buf) {
+  loader.parse(buf, '', alCargar, (e) => avisar('No se pudo leer el modelo: ' + e));
+}
+
+// Por defecto toma el modelo del proyecto. Si la pagina se abrio con doble
+// clic (file://) esto falla, y el mensaje lo explica.
+fetch('../assets/avatar/univozM.vrm')
+  .then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.arrayBuffer(); })
+  .then(cargarBuffer)
+  .catch(() => avisar(
+    'No se encontró assets/avatar/univozM.vrm.\n\n' +
+    'Si abriste el archivo con doble clic, no va a funcionar: hay que servirlo por HTTP.\n' +
+    'Desde D:\\univoz\\senas_core ejecutá:\n' +
+    '    python -m http.server 8000\n' +
+    'y abrí http://localhost:8000/tools/editor_pose.html\n\n' +
+    'También podés usar el botón "Abrir .vrm".'));
+
+$('btnAbrir').addEventListener('click', () => $('archivo').click());
+$('archivo').addEventListener('change', (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  f.arrayBuffer().then(cargarBuffer);
+});
+
+// ===========================================================================
+// Panel
+// ===========================================================================
+function llenarHuesos() {
+  const sel = $('selHueso');
+  sel.innerHTML = '';
+  for (const n of Object.values(VRMHumanBoneName)) {
+    if (!hueso(n)) continue;
+    const o = document.createElement('option');
+    o.value = n;
+    o.textContent = etiquetaHueso(n);
+    sel.appendChild(o);
+  }
+  huesoSel = sel.value || null;
+  pintarHueso();
+}
+
+function pintarHueso() {
+  const h = huesoSel ? hueso(huesoSel) : null;
+  const r = h ? h.rotation : { x: 0, y: 0, z: 0 };
+  $('rotX').value = r.x; $('valX').textContent = r.x.toFixed(2);
+  $('rotY').value = r.y; $('valY').textContent = r.y.toFixed(2);
+  $('rotZ').value = r.z; $('valZ').textContent = r.z.toFixed(2);
+}
+
+function escribirHueso() {
+  const h = huesoSel ? hueso(huesoSel) : null;
+  if (!h) return;
+  h.rotation.set(+$('rotX').value, +$('rotY').value, +$('rotZ').value);
+  $('valX').textContent = (+$('rotX').value).toFixed(2);
+  $('valY').textContent = (+$('rotY').value).toFixed(2);
+  $('valZ').textContent = (+$('rotZ').value).toFixed(2);
+}
+['rotX','rotY','rotZ'].forEach((id) => $(id).addEventListener('input', escribirHueso));
+
+$('selHueso').addEventListener('change', () => { huesoSel = $('selHueso').value; pintarHueso(); });
+$('btnCeroHueso').addEventListener('click', () => {
+  const h = huesoSel ? hueso(huesoSel) : null;
+  if (h) h.rotation.set(0, 0, 0);
+  pintarHueso();
+});
+$('btnReposo').addEventListener('click', () => { posarReposo(); pintarHueso(); });
+$('btnCeroTodo').addEventListener('click', () => {
+  for (const n of Object.values(VRMHumanBoneName)) {
+    const h = hueso(n); if (h) h.rotation.set(0, 0, 0);
+  }
+  pintarHueso();
+});
+
+// Copia la rotación al hueso simétrico, invirtiendo lo que corresponde. En un
+// rig humanoide los ejes del lado opuesto están espejados: Y y Z cambian de
+// signo, X no.
+$('btnEspejar').addEventListener('click', () => {
+  if (!huesoSel) return;
+  const otro = huesoSel.startsWith('left')
+    ? 'right' + huesoSel.slice(4)
+    : (huesoSel.startsWith('right') ? 'left' + huesoSel.slice(5) : null);
+  const a = hueso(huesoSel), b = otro ? hueso(otro) : null;
+  if (!a || !b) return;
+  b.rotation.set(a.rotation.x, -a.rotation.y, -a.rotation.z);
+});
+
+function pintarCalib() {
+  const c = cal[ladoSel];
+  $('rProf').value = c.prof;     $('valProf').textContent = c.prof.toFixed(2);
+  $('rPalma').value = c.palmaOff; $('valPalma').textContent = c.palmaOff.toFixed(2);
+  $('rReposo').value = cal.reposo; $('valReposo').textContent = cal.reposo.toFixed(2);
+  $('sgBrazo').textContent = c.zInv > 0 ? '+' : '−';
+  $('sgDedos').textContent = c.dedos > 0 ? '+' : '−';
+  $('sgPalma').textContent = c.palmaInv > 0 ? '+' : '−';
+  document.querySelectorAll('[data-lado]').forEach((b) =>
+    b.classList.toggle('primario', b.dataset.lado === ladoSel));
+}
+document.querySelectorAll('[data-lado]').forEach((b) =>
+  b.addEventListener('click', () => { ladoSel = b.dataset.lado; pintarCalib(); }));
+
+$('rProf').addEventListener('input', () => {
+  cal[ladoSel].prof = +$('rProf').value;
+  $('valProf').textContent = cal[ladoSel].prof.toFixed(2);
+  if (modoManual) { posarReposoBrazo(ladoSel); pintarHueso(); }
+});
+$('rPalma').addEventListener('input', () => {
+  cal[ladoSel].palmaOff = +$('rPalma').value;
+  $('valPalma').textContent = cal[ladoSel].palmaOff.toFixed(2);
+});
+$('rReposo').addEventListener('input', () => {
+  cal.reposo = +$('rReposo').value;
+  $('valReposo').textContent = cal.reposo.toFixed(2);
+  posarReposo(); pintarHueso();
+});
+$('invBrazo').addEventListener('click', () => {
+  cal[ladoSel].zInv *= -1; posarReposoBrazo(ladoSel); pintarCalib(); pintarHueso();
+});
+$('invDedos').addEventListener('click', () => { cal[ladoSel].dedos *= -1; pintarCalib(); });
+$('invPalma').addEventListener('click', () => { cal[ladoSel].palmaInv *= -1; pintarCalib(); });
+
+// --- pestañas -------------------------------------------------------------
+document.querySelectorAll('.pestanas button').forEach((b) => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('.pestanas button').forEach((o) => o.classList.remove('activa'));
+    b.classList.add('activa');
+    $('hojaHuesos').classList.toggle('escondida', b.dataset.hoja !== 'huesos');
+    $('hojaCalib').classList.toggle('escondida', b.dataset.hoja !== 'calib');
+    $('hojaCamara').classList.toggle('escondida', b.dataset.hoja !== 'camara');
+    $('hojaDatos').classList.toggle('escondida', b.dataset.hoja !== 'datos');
+    if (b.dataset.hoja === 'huesos') pintarHueso();
+    if (b.dataset.hoja === 'calib') pintarCalib();
+  });
+});
+
+// --- datos ----------------------------------------------------------------
+let cola = [], indice = 0, reproduciendo = false, acum = 0;
+
+function leerEntrada() {
+  try {
+    const v = JSON.parse($('entradaDatos').value);
+    if (!Array.isArray(v)) return null;
+    return Array.isArray(v[0]) ? v : [v];
+  } catch (e) { avisar('Los datos no son JSON válido: ' + e.message); return null; }
+}
+$('btnAplicarDatos').addEventListener('click', () => {
+  const s = leerEntrada(); if (!s) return;
+  modoManual = false; pintarCongelar();
+  aplicarFrame(s[0]); pintarHueso();
+});
+$('btnReproducir').addEventListener('click', () => {
+  const s = leerEntrada(); if (!s) return;
+  modoManual = false; pintarCongelar();
+  cola = s; indice = 0; acum = 0; reproduciendo = true;
+});
+
+function pintarCongelar() {
+  $('btnCongelar').classList.toggle('activo', modoManual);
+  $('btnCongelar').textContent = modoManual ? 'Datos congelados' : 'Congelar datos';
+  // La camara se pausa junto con los datos: asi la imagen de referencia se
+  // queda en el instante exacto de la pose, y se puede comparar contra el
+  // avatar mientras se gira la vista.
+  if (video.srcObject) {
+    if (modoManual) video.pause(); else video.play().catch(() => {});
+  }
+}
+$('btnCongelar').addEventListener('click', () => {
+  modoManual = !modoManual;
+  if (modoManual) reproduciendo = false;
+  pintarCongelar();
+});
+
+// --- exportar -------------------------------------------------------------
+function volcar() {
+  const f = (o) => `{ prof: ${o.prof.toFixed(2)}, zInv: ${o.zInv}, dedos: ${o.dedos}, ` +
+    `palmaInv: ${o.palmaInv}, palmaOff: ${o.palmaOff.toFixed(2)} }`;
+  const l = [
+    'const cal = {',
+    `  reposo: ${cal.reposo.toFixed(2)},`,
+    `  left:  ${f(cal.left)},`,
+    `  right: ${f(cal.right)},`,
+    '};',
+    '',
+    '// --- huesos fuera de cero (x, y, z en radianes) ---',
+  ];
+  for (const n of Object.values(VRMHumanBoneName)) {
+    const h = hueso(n); if (!h) continue;
+    const r = h.rotation;
+    if (Math.abs(r.x) < 0.01 && Math.abs(r.y) < 0.01 && Math.abs(r.z) < 0.01) continue;
+    l.push(`// ${etiquetaHueso(n).padEnd(24)} ${n}: ${r.x.toFixed(3)}, ${r.y.toFixed(3)}, ${r.z.toFixed(3)}`);
+  }
+  return l.join('\n');
+}
+$('btnCopiar').addEventListener('click', async () => {
+  const t = volcar();
+  $('salida').value = t;
+  $('salida').style.display = 'block';
+  try { await navigator.clipboard.writeText(t); } catch (e) { $('salida').select(); }
+});
+
+// ===========================================================================
+// EXPERIMENTO: brazos resueltos en 3D
+// ===========================================================================
+// El camino normal usa el vector de 138 dimensiones, que es 2D: sign_norm
+// descarta la Z del cuerpo. Eso hace imposible distinguir una mano adelante
+// de una mano pegada al hombro, y obliga a plegar el codo casi 180 grados
+// para colocar la mano donde la proyeccion dice que esta.
+//
+// Aca se usa worldLandmarks de MediaPipe: un esqueleto metrico en 3D con
+// origen en la cadera, no la Z aproximada de la imagen.
+//
+// El metodo evita suponer ejes, que es lo que fallo una y otra vez. Se mide
+// la orientacion de reposo del rig al cargar el modelo, se arma una base
+// ortonormal del cuerpo de la persona y otra del avatar, y se traslada la
+// direccion de cada segmento de una base a la otra. Ninguna constante de
+// signo.
+let usar3D_noUsado = false;
+const refRig = { left: null, right: null };
+const avDerecha = new THREE.Vector3();
+const avArriba = new THREE.Vector3(0, 1, 0);
+// El avatar mira a +Z: es VRM 0.0 (mira a -Z) y la escena se voltea media
+// vuelta al cargarlo. Se ve confirmado en pantalla, el avatar da la cara.
+const avFrente = new THREE.Vector3(0, 0, 1);
+
+function medirRig() {
+  // Hay que medir con TODO en cero: la pose de reposo ya rota los brazos y
+  // falsearia las direcciones de referencia.
+  for (const n of Object.values(VRMHumanBoneName)) {
+    const h = hueso(n); if (h) h.rotation.set(0, 0, 0);
+  }
+  vrm.scene.updateMatrixWorld(true);
+
+  const pL = new THREE.Vector3(), pR = new THREE.Vector3();
+  hueso(VRMHumanBoneName.LeftUpperArm).getWorldPosition(pL);
+  hueso(VRMHumanBoneName.RightUpperArm).getWorldPosition(pR);
+  avDerecha.subVectors(pR, pL).normalize();
+
+  for (const lado of ['left', 'right']) {
+    const up = hueso(lado === 'left' ? VRMHumanBoneName.LeftUpperArm : VRMHumanBoneName.RightUpperArm);
+    const lo = hueso(lado === 'left' ? VRMHumanBoneName.LeftLowerArm : VRMHumanBoneName.RightLowerArm);
+    const ma = hueso(lado === 'left' ? VRMHumanBoneName.LeftHand : VRMHumanBoneName.RightHand);
+    if (!up || !lo || !ma) { refRig[lado] = null; continue; }
+    const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+    up.getWorldPosition(a); lo.getWorldPosition(b); ma.getWorldPosition(c);
+    refRig[lado] = {
+      dirUp: b.clone().sub(a).normalize(),
+      dirLo: c.clone().sub(b).normalize(),
+      qUp: up.getWorldQuaternion(new THREE.Quaternion()),
+      qLo: lo.getWorldQuaternion(new THREE.Quaternion()),
+      qPadre: up.parent.getWorldQuaternion(new THREE.Quaternion()),
+    };
+  }
+}
+
+// Traslada una direccion del espacio de la persona al del avatar.
+function aBaseAvatar(v, pDer, pArr, pFre) {
+  return new THREE.Vector3()
+    .addScaledVector(avDerecha, v.dot(pDer))
+    .addScaledVector(avArriba,  v.dot(pArr))
+    .addScaledVector(avFrente,  v.dot(pFre))
+    .normalize();
+}
+
+function resolverBrazo3D(lado, dirUp, dirLo) {
+  const r = refRig[lado];
+  if (!r) return;
+  const up = hueso(lado === 'left' ? VRMHumanBoneName.LeftUpperArm : VRMHumanBoneName.RightUpperArm);
+  const lo = hueso(lado === 'left' ? VRMHumanBoneName.LeftLowerArm : VRMHumanBoneName.RightLowerArm);
+
+  const qU = new THREE.Quaternion().setFromUnitVectors(r.dirUp, dirUp);
+  const mundoU = qU.clone().multiply(r.qUp);
+  up.quaternion.copy(r.qPadre.clone().invert().multiply(mundoU));
+  if (!dirLo) return;
+
+  // El antebrazo ya se movio arrastrado por el brazo: su nueva direccion de
+  // partida es la de reposo girada por qU.
+  const partida = r.dirLo.clone().applyQuaternion(qU);
+  const qL = new THREE.Quaternion().setFromUnitVectors(partida, dirLo);
+  const mundoL = qL.clone().multiply(qU).multiply(r.qLo);
+  lo.quaternion.copy(mundoU.clone().invert().multiply(mundoL));
+}
+
+// Indices de pose: 11/12 hombros, 13/14 codos, 15/16 munecas, 23/24 caderas.
+function aplicarBrazos3D(W) {
+  const V = (p) => new THREE.Vector3(p.x, p.y, p.z);
+  const hombroI = V(W[11]), hombroD = V(W[12]);
+  const caderaI = V(W[23]), caderaD = V(W[24]);
+
+  // Base del cuerpo de la persona, medida de su propio esqueleto.
+  const pDer = hombroD.clone().sub(hombroI).normalize();
+  const centroHombros = hombroI.clone().add(hombroD).multiplyScalar(0.5);
+  const centroCaderas = caderaI.clone().add(caderaD).multiplyScalar(0.5);
+  const pArr = centroHombros.clone().sub(centroCaderas).normalize();
+  const pFre = new THREE.Vector3().crossVectors(pArr, pDer).normalize();
+  // En worldLandmarks, mas cerca de la camara es Z menor. La persona mira a
+  // la camara, asi que su frente tiene Z negativa.
+  if (pFre.z > 0) pFre.negate();
+
+  for (const [lado, iH, iC, iM] of [['left', 11, 13, 15], ['right', 12, 14, 16]]) {
+    const h = V(W[iH]), c = V(W[iC]), m = V(W[iM]);
+    const vUp = c.clone().sub(h);
+    const vLo = m.clone().sub(c);
+    if (vUp.length() < 1e-4 || vLo.length() < 1e-4) continue;
+    resolverBrazo3D(lado,
+      aBaseAvatar(vUp.normalize(), pDer, pArr, pFre),
+      aBaseAvatar(vLo.normalize(), pDer, pArr, pFre));
+  }
+}
+
+// El interruptor de profundidad 3D desaparecio: desde sign_norm 2.0.0 el
+// camino normal YA usa worldLandmarks, asi que no hay dos modos que comparar.
+// Se conserva la maquinaria de medicion del rig, que es la que traslada las
+// direcciones de la base del cuerpo a la del avatar.
+const usar3D = false;
+let diag3D = 'integrado en el camino normal';
+
+// ===========================================================================
+// Cámara + MediaPipe
+// ===========================================================================
+// Port de normalizeFrame() de lib/sign_norm.dart, version 2.0.0 (152 dims).
+// Tiene que dar EXACTAMENTE el mismo vector: si diverge, lo que se ve aca no
+// es lo que ve la app y la herramienta miente. Cualquier cambio en
+// sign_norm.dart (o en tools/sign_norm.py) hay que reflejarlo aqui.
+//
+// El bloque de cuerpo sale del esqueleto METRICO (worldLandmarks), proyectado
+// sobre una base ortonormal sacada del propio esqueleto. La Z de los
+// landmarks de imagen no sirve: se midio incoherente entre puntos vecinos.
+const K_LSHOULDER = 11, K_RSHOULDER = 12, K_LHIP = 23, K_RHIP = 24;
+const K_LWRIST = 15, K_RWRIST = 16;
+const K_POSE_BODY = [11, 12, 13, 14, 15, 16, 23, 24];
+const K_HAND_MIDDLE_MCP = 9;
+const K_MIN_VIS = 0.5, K_EPS = 1e-6, K_DIM = 152;
+
+function baseDe(W) {
+  const V = (p) => new THREE.Vector3(p.x, p.y, p.z);
+  const hi = V(W[K_LSHOULDER]), hd = V(W[K_RSHOULDER]);
+  const ci = V(W[K_LHIP]), cd = V(W[K_RHIP]);
+
+  const dif = hd.clone().sub(hi);
+  const escala = dif.length();
+  if (escala < K_EPS) return null;
+  const der = dif.normalize();
+
+  const origen = hi.clone().add(hd).multiplyScalar(0.5);
+  const centroCaderas = ci.clone().add(cd).multiplyScalar(0.5);
+
+  // Gram-Schmidt: arriba ortogonalizado contra la linea de hombros.
+  const tronco = origen.clone().sub(centroCaderas);
+  const arr = tronco.clone().addScaledVector(der, -tronco.dot(der));
+  if (arr.length() < K_EPS) return null;
+  arr.normalize();
+
+  // Frente = arriba x derecha. Con los ejes de worldLandmarks apunta hacia
+  // el pecho de la persona.
+  const fre = new THREE.Vector3().crossVectors(arr, der).normalize();
+  return { der, arr, fre, origen, escala };
+}
+
+function proyectar(b, p) {
+  const q = new THREE.Vector3(p.x, p.y, p.z).sub(b.origen);
+  return [q.dot(b.der) / b.escala, q.dot(b.arr) / b.escala, q.dot(b.fre) / b.escala];
+}
+
+function normalizarFrame(pose, poseMundo, izq, der) {
+  if (!pose || pose.length < 33) return null;
+  if (!poseMundo || poseMundo.length < 33) return null;
+  const ls = pose[K_LSHOULDER], rs = pose[K_RSHOULDER];
+  if (ls.length > 3 && (ls[3] < K_MIN_VIS || rs[3] < K_MIN_VIS)) return null;
+
+  const b = baseDe(poseMundo);
+  if (!b) return null;
+
+  // Marco 2D de imagen: solo para la FORMA de las manos.
+  const dx = rs[0] - ls[0], dy = rs[1] - ls[1];
+  const escalaImg = Math.sqrt(dx * dx + dy * dy);
+  if (escalaImg < K_EPS) return null;
+  const cosT = dx / escalaImg, sinT = dy / escalaImg;
+
+  const out = new Array(K_DIM).fill(0);
+
+  for (let i = 0; i < K_POSE_BODY.length; i++) {
+    const q = proyectar(b, poseMundo[K_POSE_BODY[i]]);
+    out[kOffBody + i * 3] = q[0];
+    out[kOffBody + i * 3 + 1] = q[1];
+    out[kOffBody + i * 3 + 2] = q[2];
+  }
+
+  for (const [mano, offLoc, offPres, offShape, idxMuneca] of
+       [[izq, kOffLocL, kOffPresL, kOffShapeL, K_LWRIST],
+        [der, kOffLocR, kOffPresR, kOffShapeR, K_RWRIST]]) {
+    if (!mano || mano.length < 21) continue;
+
+    // Ubicacion: la muneca del modelo de POSE, para que quede en el mismo
+    // espacio metrico que el cuerpo.
+    const q = proyectar(b, poseMundo[idxMuneca]);
+    out[offLoc] = q[0];
+    out[offLoc + 1] = q[1];
+    out[offLoc + 2] = q[2];
+    out[offPres] = 1.0;
+
+    const w = mano[0];
+    const m = mano[K_HAND_MIDDLE_MCP];
+    const hdx = m[0] - w[0], hdy = m[1] - w[1];
+    let escalaMano = Math.sqrt(hdx * hdx + hdy * hdy);
+    if (escalaMano < K_EPS) escalaMano = escalaImg * 0.25;
+
+    for (let j = 1; j < 21; j++) {
+      const p = mano[j];
+      const qx = p[0] - w[0], qy = p[1] - w[1];
+      const k = offShape + (j - 1) * 3;
+      out[k]     = (qx * cosT + qy * sinT) / escalaMano;
+      out[k + 1] = (-qx * sinT + qy * cosT) / escalaMano;
+      out[k + 2] = (p[2] - w[2]) / escalaMano;
+    }
+  }
+  return out;
+}
+
+let camaraViva = false, cruzarManos = false;
+let detectorPose = null, detectorManos = null, flujo = null;
+// Ultimo vector de 138 dimensiones que se aplico. Es el dato crudo que hay
+// que guardar: los angulos de los huesos son su consecuencia, no su origen.
+let ultimoVector = null;
+// worldLandmarks del mismo instante. Se guarda para poder comparar las dos
+// fuentes de profundidad sobre el MISMO frame: la Z barata que viaja en el
+// vector normalizado contra la metrica de MediaPipe. Si el brazo sale bien
+// con una y mal con la otra, la diferencia esta en estos numeros.
+let ultimoPoseMundo = null;
+const video = $('video');
+
+function estadoCam(txt) { $('estadoCam').textContent = txt; }
+
+$('btnCruzar').addEventListener('click', () => {
+  cruzarManos = !cruzarManos;
+  $('btnCruzar').textContent = 'Cruzar manos: ' + (cruzarManos ? 'sí' : 'no');
+});
+
+async function encenderCamara() {
+  estadoCam('Bajando modelos de MediaPipe...');
+  try {
+    const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14');
+    const fileset = await vision.FilesetResolver.forVisionTasks(
+      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
+
+    detectorPose = await vision.PoseLandmarker.createFromOptions(fileset, {
+      baseOptions: { modelAssetPath:
+        'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task' },
+      runningMode: 'VIDEO', numPoses: 1,
+    });
+    detectorManos = await vision.HandLandmarker.createFromOptions(fileset, {
+      baseOptions: { modelAssetPath:
+        'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task' },
+      runningMode: 'VIDEO', numHands: 2,
+    });
+
+    estadoCam('Pidiendo permiso de cámara...');
+    flujo = await navigator.mediaDevices.getUserMedia({
+      video: { width: 640, height: 480 }, audio: false });
+    video.srcObject = flujo;
+    await video.play();
+
+    camaraViva = true;
+    modoManual = false;
+    pintarCongelar();
+    $('btnCamara').textContent = 'Apagar cámara';
+    estadoCam('Siguiendo.');
+    requestAnimationFrame(bucleCamara);
+  } catch (e) {
+    estadoCam('No se pudo iniciar: ' + e.message);
+    avisar('Cámara: ' + e.message + '\n\nSi el navegador la bloqueó, revisá que ' +
+           'la página sea http://localhost (no una IP ni file://): getUserMedia ' +
+           'solo funciona en contextos seguros.');
+  }
+}
+
+function apagarCamara() {
+  camaraViva = false;
+  if (flujo) flujo.getTracks().forEach((t) => t.stop());
+  flujo = null; video.srcObject = null;
+  $('btnCamara').textContent = 'Encender cámara';
+  estadoCam('Cámara apagada.');
+}
+
+$('btnCamara').addEventListener('click', () =>
+  camaraViva ? apagarCamara() : encenderCamara());
+
+function bucleCamara() {
+  if (!camaraViva) return;
+  requestAnimationFrame(bucleCamara);
+  if (video.readyState < 2) return;
+
+  const t = performance.now();
+  let pose = null, poseMundo = null, izq = null, der = null;
+
+  const rp = detectorPose.detectForVideo(video, t);
+  if (rp.landmarks && rp.landmarks[0]) {
+    pose = rp.landmarks[0].map((p) => [p.x, p.y, p.z, p.visibility ?? 1]);
+  }
+  // worldLandmarks es el esqueleto metrico en 3D; solo lo usa el modo
+  // experimental de profundidad.
+  if (rp.worldLandmarks && rp.worldLandmarks[0]) poseMundo = rp.worldLandmarks[0];
+
+  const rm = detectorManos.detectForVideo(video, t);
+  if (rm.landmarks && rm.landmarks.length) {
+    const manos = rm.landmarks.map((l) => l.map((p) => [p.x, p.y, p.z]));
+
+    // Asignacion izquierda/derecha por CERCANIA a las munecas del modelo de
+    // pose (landmark 15 = muneca izquierda, 16 = derecha), no por la
+    // etiqueta handedness de MediaPipe.
+    //
+    // Motivo: handedness asume que la imagen viene espejada, como una
+    // selfie, y aca se le pasa el cuadro crudo de la webcam. Su "Left" es
+    // la mano derecha de la persona. Con una sola mano casi no se notaba;
+    // con dos, cada brazo perseguia la muneca del lado contrario y el avatar
+    // terminaba con los brazos cruzados sobre el vientre. Verificado contra
+    // un frame guardado: muneca izq de pose en x=-0.691 y "mano izquierda"
+    // del detector en x=+0.667.
+    //
+    // Las munecas de pose vienen etiquetadas anatomicamente y no dependen de
+    // ninguna convencion de espejado, asi que son la referencia confiable.
+    if (pose) {
+      const mI = pose[15], mD = pose[16];
+      const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+      if (manos.length === 1) {
+        const w = manos[0][0];
+        if (dist(w, mI) <= dist(w, mD)) izq = manos[0]; else der = manos[0];
+      } else {
+        // Dos manos: se elige el emparejamiento de menor coste total, para
+        // que no puedan quedar las dos asignadas a la misma muneca.
+        const a = manos[0][0], b = manos[1][0];
+        if (dist(a, mI) + dist(b, mD) <= dist(a, mD) + dist(b, mI)) {
+          izq = manos[0]; der = manos[1];
+        } else {
+          der = manos[0]; izq = manos[1];
+        }
+      }
+    } else {
+      // Sin cuerpo no hay referencia; se cae a la etiqueta de MediaPipe.
+      for (let i = 0; i < manos.length; i++) {
+        if (rm.handedness?.[i]?.[0]?.categoryName === 'Left') izq = manos[i];
+        else der = manos[i];
+      }
+    }
+
+    // Sigue disponible como anulacion manual, por si algun dia hace falta.
+    if (cruzarManos) { const tmp = izq; izq = der; der = tmp; }
+  }
+
+  const v = normalizarFrame(pose, poseMundo, izq, der);
+  if (v) { ultimoVector = v; ultimoPoseMundo = poseMundo; }
+  estadoCam(
+    (pose ? '✓' : '✗') + ' cuerpo   ' +
+    (izq ? '✓' : '✗') + ' izq   ' +
+    (der ? '✓' : '✗') + ' der' +
+    (v ? '' : '   — sin vector (¿hombros fuera de cuadro?)') +
+    '\n3D: ' + (usar3D ? diag3D : 'apagado') +
+    '   · worldLandmarks: ' + (poseMundo ? poseMundo.length + ' pts' : 'no'));
+
+  // modoManual congela: el avatar se queda en la ultima pose aplicada, que
+  // es justo lo que se quiere para revisarla girando la camara.
+  if (v && !modoManual) {
+    aplicarFrame(v);
+    // Los brazos en 3D se resuelven DESPUES y pisan lo que hizo aplicarFrame.
+    // Dedos y palma siguen viniendo del vector de 138, que para las manos si
+    // tiene XYZ completo.
+    // El modo 3D experimental ya no hace falta: desde sign_norm 2.0.0 el
+    // camino normal usa profundidad. Se deja el interruptor porque compara
+    // dos fuentes distintas -- worldLandmarks (metrico) contra la Z
+    // normalizada que guarda el vector -- y sirve para ver cuanto se pierde.
+    if (usar3D) {
+      if (!poseMundo) {
+        diag3D = 'sin worldLandmarks';
+      } else if (!refRig.left || !refRig.right) {
+        diag3D = 'rig sin medir (refRig vacio)';
+      } else {
+        try {
+          aplicarBrazos3D(poseMundo);
+          diag3D = 'aplicado';
+        } catch (e) {
+          diag3D = 'ERROR: ' + e.message;
+        }
+      }
+    }
+    pintarHueso();
+  }
+}
+
+// ===========================================================================
+// Guardar pose
+// ===========================================================================
+// Descarga dos archivos: una imagen con la referencia y el avatar lado a
+// lado, y un JSON con el vector crudo, los huesos y la calibracion. La
+// imagen es para mirarla; el JSON es lo que permite reproducir el caso
+// exacto sin depender de una descripcion.
+function bajarArchivo(nombre, blobOUrl) {
+  const a = document.createElement('a');
+  a.download = nombre;
+  a.href = typeof blobOUrl === 'string' ? blobOUrl : URL.createObjectURL(blobOUrl);
+  a.click();
+  if (typeof blobOUrl !== 'string') setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
+function sello() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_` +
+         `${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+function huesosFueraDeCero() {
+  const o = {};
+  for (const n of Object.values(VRMHumanBoneName)) {
+    const h = hueso(n); if (!h) continue;
+    const r = h.rotation;
+    if (Math.abs(r.x) < 0.01 && Math.abs(r.y) < 0.01 && Math.abs(r.z) < 0.01) continue;
+    o[n] = [+r.x.toFixed(4), +r.y.toFixed(4), +r.z.toFixed(4)];
+  }
+  return o;
+}
+
+function componerImagen() {
+  const alto = 480;
+  const anchoCam = (video.videoWidth && video.videoHeight)
+    ? Math.round(alto * video.videoWidth / video.videoHeight) : 0;
+  const anchoAv = Math.round(alto * lienzo.width / lienzo.height);
+
+  const c = document.createElement('canvas');
+  c.width = anchoCam + anchoAv;
+  c.height = alto + 22;
+  const g = c.getContext('2d');
+  g.fillStyle = '#14151a';
+  g.fillRect(0, 0, c.width, c.height);
+
+  if (anchoCam) {
+    // Espejada, igual que se ve en pantalla: asi la referencia coincide con
+    // lo que la persona estaba viendo al hacer la sena.
+    g.save();
+    g.translate(anchoCam, 0);
+    g.scale(-1, 1);
+    g.drawImage(video, 0, 0, anchoCam, alto);
+    g.restore();
+  }
+  g.drawImage(lienzo, anchoCam, 0, anchoAv, alto);
+
+  g.fillStyle = '#9a9aa8';
+  g.font = '13px sans-serif';
+  if (anchoCam) g.fillText('referencia', 8, alto + 16);
+  g.fillText('avatar', anchoCam + 8, alto + 16);
+  return c;
+}
+
+$('btnGuardar').addEventListener('click', () => {
+  // Congelar primero: la captura tiene que ser del mismo instante que la
+  // pose, no del cuadro siguiente.
+  if (!modoManual) { modoManual = true; reproduciendo = false; pintarCongelar(); }
+
+  const s = sello();
+  // Comparacion de las dos fuentes de profundidad sobre el mismo instante.
+  // Es lo que permite decidir si la Z del vector alcanza o si hay que hacer
+  // que Kotlin mande worldLandmarks tambien.
+  const diag = { base: null, brazos: null };
+  try {
+    if (ultimoVector) {
+      const p = frameA3Puntos(ultimoVector);
+      const b = baseCuerpo(p);
+      const r3 = (v) => [+v.x.toFixed(4), +v.y.toFixed(4), +v.z.toFixed(4)];
+      if (b) {
+        diag.base = { der: r3(b.pDer), arr: r3(b.pArr), fre: r3(b.pFre) };
+        diag.brazos = {
+          // Direcciones en el espacio del avatar, segun el vector (2 fuentes
+          // para comparar contra worldLandmarks a mano).
+          izqBrazo: r3(aBaseAvatar(p.codoI.clone().sub(p.hombroI).normalize(), b.pDer, b.pArr, b.pFre)),
+          izqAnte: r3(aBaseAvatar(p.munI.clone().sub(p.codoI).normalize(), b.pDer, b.pArr, b.pFre)),
+          derBrazo: r3(aBaseAvatar(p.codoD.clone().sub(p.hombroD).normalize(), b.pDer, b.pArr, b.pFre)),
+          derAnte: r3(aBaseAvatar(p.munD.clone().sub(p.codoD).normalize(), b.pDer, b.pArr, b.pFre)),
+        };
+      }
+      diag.puntos = {
+        hombroI: r3(p.hombroI), hombroD: r3(p.hombroD),
+        codoI: r3(p.codoI), codoD: r3(p.codoD),
+        munI: r3(p.munI), munD: r3(p.munD),
+        caderaI: r3(p.caderaI), caderaD: r3(p.caderaD),
+      };
+      diag.avatar = {
+        derecha: [+avDerecha.x.toFixed(4), +avDerecha.y.toFixed(4), +avDerecha.z.toFixed(4)],
+      };
+    }
+  } catch (e) { diag.error = e.message; }
+
+  const datos = {
+    creado: new Date().toISOString(),
+    herramienta: 'tools/editor_pose.html',
+    modo3D: usar3D,
+    cal: JSON.parse(JSON.stringify(cal)),
+    huesos: huesosFueraDeCero(),
+    // El frame normalizado tal cual lo consume el visor y el clasificador.
+    frame: ultimoVector,
+    // El esqueleto metrico del mismo instante, para comparar profundidades.
+    worldLandmarks: ultimoPoseMundo
+      ? ultimoPoseMundo.map((p) => [+p.x.toFixed(5), +p.y.toFixed(5), +p.z.toFixed(5)])
+      : null,
+    diagnostico: diag,
+  };
+  bajarArchivo(`pose_${s}.json`,
+    new Blob([JSON.stringify(datos, null, 2)], { type: 'application/json' }));
+
+  // El render tiene que ser fresco: el bucle pudo haber dibujado despues de
+  // la ultima vez que se llamo a render desde aca.
+  renderer.render(scene, camera);
+  componerImagen().toBlob((b) => bajarArchivo(`pose_${s}.png`, b), 'image/png');
+});
+
+// ===========================================================================
+// Bucle
+// ===========================================================================
+let ultimo = 0;
+function animar(t) {
+  requestAnimationFrame(animar);
+  const dt = ultimo ? t - ultimo : 16;
+  ultimo = t;
+
+  if (reproduciendo && !modoManual) {
+    acum += dt;
+    const paso = 1000 / 24;
+    while (acum >= paso && reproduciendo) {
+      acum -= paso;
+      if (indice >= cola.length) { reproduciendo = false; posarReposo(); break; }
+      aplicarFrame(cola[indice++]);
+    }
+  }
+
+  orbita.update();
+  // Sin esto three-vrm no baja las rotaciones de los huesos normalizados al
+  // rig real y el modelo se queda en T-pose pase lo que pase.
+  if (vrm) vrm.update(dt / 1000);
+  renderer.render(scene, camera);
+}
+
+ajustarTamano();
+pintarCongelar();
+pintarCalib();
+requestAnimationFrame(animar);
+</script>
+</body>
+</html>

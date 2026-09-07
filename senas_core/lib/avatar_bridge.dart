@@ -42,6 +42,11 @@ class AvatarBridge {
   /// mandada. Util para encadenar varias palabras (una frase completa).
   void Function()? onTerminado;
 
+  /// Se llama cuando se captura una pose desde el editor del visor. El texto
+  /// que llega es el volcado completo de los huesos movidos, listo para
+  /// pegar. La pantalla que lo reciba se encarga de copiarlo al portapapeles.
+  void Function(String)? onPoseCapturada;
+
   AvatarBridge() {
     controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
@@ -51,6 +56,8 @@ class AvatarBridge {
         onMessageReceived: (msg) {
           if (msg.message == 'fin') {
             onTerminado?.call();
+          } else if (msg.message.startsWith('pose:')) {
+            onPoseCapturada?.call(msg.message.substring(5));
           } else if (msg.message == 'js_listo') {
             // La pagina ya importo three.js/three-vrm y esta lista para
             // recibir el modelo. Se lo mandamos nosotros en vez de que lo
@@ -89,6 +96,17 @@ class AvatarBridge {
         .runJavaScript("window.reproducirSecuencia('${_escapar(json)}')");
   }
 
+  /// Aplica UN frame al instante, sin cola ni interpolacion. Es lo que usa
+  /// el modo espejo (pantalla_espejo.dart) para que el avatar siga a la
+  /// camara en vivo. Corta cualquier reproduccion en curso.
+  ///
+  /// Devuelve cuando el WebView termino de procesarlo, para poder saltar
+  /// frames en vez de encolarlos si el telefono no da abasto.
+  Future<void> mostrarFrame(List<double> v) async {
+    await controller.runJavaScript(
+        "window.aplicarFrameVivo('${jsonEncode(v)}')");
+  }
+
   // Los frames son puramente numericos (nunca llevan comillas ni barras),
   // asi que esto es mas una red de seguridad que algo que vaya a activarse
   // en la practica.
@@ -96,5 +114,6 @@ class AvatarBridge {
 
   void dispose() {
     onTerminado = null;
+    onPoseCapturada = null;
   }
 }

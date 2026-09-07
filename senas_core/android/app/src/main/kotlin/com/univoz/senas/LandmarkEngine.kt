@@ -42,16 +42,31 @@ class LandmarkEngine(
     private val onError: (String) -> Unit,
 ) {
 
-    /** pose: 33 x (x, y, z, visibility). manos: 21 x (x, y, z) o null. */
+    /**
+     * pose: 33 x (x, y, z, visibility) en coordenadas de imagen [0,1].
+     * poseMundo: 33 x (x, y, z) en METROS, con origen en el punto medio de
+     *   las caderas. Es el esqueleto 3D real, no la profundidad aproximada
+     *   que trae `pose`.
+     * manos: 21 x (x, y, z) o null.
+     *
+     * Las dos versiones de pose viajan juntas porque sirven para cosas
+     * distintas: las de imagen son las que se pintan sobre el preview de la
+     * camara, y las metricas son las unicas con las que se puede reconstruir
+     * una postura. La Z de `pose` se midio incoherente entre puntos vecinos
+     * (recorridos de 3.5 anchos de hombro en un antebrazo de 0.8), asi que
+     * no sirve para orientar huesos.
+     */
     class FrameResult(
         val timestampMs: Long,
         val pose: DoubleArray?,
+        val poseMundo: DoubleArray?,
         val left: DoubleArray?,
         val right: DoubleArray?,
     )
 
     private class Pendiente {
         var pose: DoubleArray? = null
+        var poseMundo: DoubleArray? = null
         var left: DoubleArray? = null
         var right: DoubleArray? = null
         var tienePose = false
@@ -66,6 +81,7 @@ class LandmarkEngine(
     // distintos (cada modelo tiene su propio callback interno).
     private val ultimoLock = Any()
     private var ultimaPose: DoubleArray? = null
+    private var ultimaPoseMundo: DoubleArray? = null
     private var ultimaIzq: DoubleArray? = null
     private var ultimaDer: DoubleArray? = null
 
@@ -181,13 +197,27 @@ class LandmarkEngine(
                 it[i * 4 + 3] = (p.visibility().orElse(0f)).toDouble()
             }
         }
-        completar(t) { it.pose = arr; it.tienePose = true }
+
+        // Esqueleto metrico. Sin visibility: worldLandmarks no la trae, y de
+        // todos modos el filtro por visibilidad se hace con `pose`.
+        val wlm = result.worldLandmarks().firstOrNull()
+        val arrMundo = if (wlm == null || wlm.size < 33) null else DoubleArray(33 * 3).also {
+            for (i in 0 until 33) {
+                val p = wlm[i]
+                it[i * 3] = p.x().toDouble()
+                it[i * 3 + 1] = p.y().toDouble()
+                it[i * 3 + 2] = p.z().toDouble()
+            }
+        }
+
+        completar(t) { it.pose = arr; it.poseMundo = arrMundo; it.tienePose = true }
 
         val (izq, der) = synchronized(ultimoLock) {
             ultimaPose = arr
+            ultimaPoseMundo = arrMundo
             ultimaIzq to ultimaDer
         }
-        onPreview(FrameResult(t, arr, izq, der))
+        onPreview(FrameResult(t, arr, arrMundo, izq, der))
     }
 
     private fun onManos(result: HandLandmarkerResult) {
@@ -218,12 +248,12 @@ class LandmarkEngine(
 
         completar(t) { it.left = izq; it.right = der; it.tieneManos = true }
 
-        val pose = synchronized(ultimoLock) {
+        val (pose, poseMundo) = synchronized(ultimoLock) {
             ultimaIzq = izq
             ultimaDer = der
-            ultimaPose
+            ultimaPose to ultimaPoseMundo
         }
-        onPreview(FrameResult(t, pose, izq, der))
+        onPreview(FrameResult(t, pose, poseMundo, izq, der))
     }
 
     private inline fun completar(t: Long, bloque: (Pendiente) -> Unit) {
@@ -233,7 +263,7 @@ class LandmarkEngine(
             bloque(p)
             if (p.tienePose && p.tieneManos) {
                 pendientes.remove(t)
-                listo = FrameResult(t, p.pose, p.left, p.right)
+                listo = FrameResult(t, p.pose, p.poseMundo, p.left, p.right)
             }
         }
         listo?.let(onFrame)
@@ -245,6 +275,7 @@ class LandmarkEngine(
         synchronized(pendientes) { pendientes.clear() }
         synchronized(ultimoLock) {
             ultimaPose = null
+            ultimaPoseMundo = null
             ultimaIzq = null
             ultimaDer = null
         }

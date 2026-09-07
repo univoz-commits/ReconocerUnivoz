@@ -213,20 +213,23 @@ class LandmarkPlugin(
         return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, m, false)
     }
     private fun emitir(f: LandmarkEngine.FrameResult) {
-        val payload = HashMap<String, Any?>(4)
-        payload["t"] = f.timestampMs
-        payload["pose"] = f.pose
-        payload["left"] = f.left
-        payload["right"] = f.right
-        principal.post { sink?.success(payload) }
+        principal.post { sink?.success(aMapa(f)) }
     }
+
     private fun emitirPreview(f: LandmarkEngine.FrameResult) {
-        val payload = HashMap<String, Any?>(4)
+        principal.post { sinkPreview?.success(aMapa(f)) }
+    }
+
+    private fun aMapa(f: LandmarkEngine.FrameResult): HashMap<String, Any?> {
+        val payload = HashMap<String, Any?>(5)
         payload["t"] = f.timestampMs
         payload["pose"] = f.pose
+        // Esqueleto metrico en 3D: es el unico con el que se puede
+        // reconstruir una postura (ver LandmarkEngine.FrameResult).
+        payload["poseMundo"] = f.poseMundo
         payload["left"] = f.left
         payload["right"] = f.right
-        principal.post { sinkPreview?.success(payload) }
+        return payload
     }
     private fun detener() {
         cameraProvider?.unbindAll()

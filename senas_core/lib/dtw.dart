@@ -8,6 +8,28 @@ import 'dart:math' as math;
 
 import 'sign_norm.dart';
 
+/// Dimensiones del bloque de cuerpo que entran en la distancia: codos,
+/// munecas y caderas, solo X e Y.
+///
+/// Quedan fuera dos cosas a proposito. Los hombros, porque su X e Y son
+/// constantes por construccion (-0.5 y +0.5) y sumarian siempre cero. Y
+/// TODAS las Z del cuerpo, porque la profundidad que estima MediaPipe Pose es
+/// ruidosa: sirve de sobra para animar al avatar, que es para lo que se
+/// agrego en la version 2.0.0 de sign_norm, pero al comparar dos senas mete
+/// mas error que senal.
+///
+/// El resultado es que el clasificador compara EXACTAMENTE las mismas 12
+/// dimensiones de cuerpo que antes del cambio a 3D. Si algun dia se quiere
+/// probar si la profundidad ayuda a reconocer, basta con agregar aqui los
+/// indices de kZBodyDims y volver a medir contra el set de prueba.
+const List<int> kBodyDistDims = [
+  6, 7, // codo izq
+  9, 10, // codo der
+  12, 13, // muneca izq
+  15, 16, // muneca der
+  18, 19, // cadera izq
+  21, 22, // cadera der
+];
 const int kNBody = 12;
 const int kNShape = 60;
 
@@ -32,7 +54,7 @@ double frameDistance(List<double> a, List<double> b) {
   var acc = 0.0;
 
   var s = 0.0;
-  for (var i = kOffBody; i < kOffBody + kNBody; i++) {
+  for (final i in kBodyDistDims) {
     final d = a[i] - b[i];
     s += d * d;
   }
@@ -51,6 +73,8 @@ double frameDistance(List<double> a, List<double> b) {
     final ha = pa >= 0.5;
     final hb = pb >= 0.5;
     if (ha && hb) {
+      // Solo X e Y: la Z de la muneca es profundidad de cuerpo, y va fuera
+      // por el mismo motivo que kBodyDistDims.
       final d0 = a[offLoc] - b[offLoc];
       final d1 = a[offLoc + 1] - b[offLoc + 1];
       acc += kWLoc * (d0 * d0 + d1 * d1) / 2.0;

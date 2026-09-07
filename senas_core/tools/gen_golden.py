@@ -30,6 +30,38 @@ def make_pose(rng, cx, cy, w):
     return pose
 
 
+def make_pose_mundo(rng, w=0.32, inclinacion=0.0):
+    """Esqueleto METRICO sintetico, en metros, con origen en las caderas.
+
+    Ejes de MediaPipe worldLandmarks: X a la derecha de la imagen, Y hacia
+    abajo, Z creciendo al alejarse de la camara. La persona mira a la camara,
+    asi que su hombro IZQUIERDO (indice 11) cae del lado +X.
+
+    [inclinacion] inclina el tronco hacia adelante en radianes, para que los
+    casos no tengan la base perfectamente vertical y el golden ejercite la
+    ortogonalizacion.
+    """
+    import math
+    alto_tronco = 0.50
+    ca, sa = math.cos(inclinacion), math.sin(inclinacion)
+
+    w3 = []
+    for i in range(33):
+        w3.append([
+            round(rng.uniform(-0.4, 0.4), 6),
+            round(rng.uniform(-0.9, 0.2), 6),
+            round(rng.uniform(-0.3, 0.3), 6),
+        ])
+    # Caderas en el origen, hombros arriba (Y negativa) y algo adelantados.
+    w3[sn.L_HIP] = [round(w / 2 * 0.8, 6), 0.0, 0.0]
+    w3[sn.R_HIP] = [round(-w / 2 * 0.8, 6), 0.0, 0.0]
+    w3[sn.L_SHOULDER] = [round(w / 2, 6), round(-alto_tronco * ca, 6),
+                         round(-alto_tronco * sa, 6)]
+    w3[sn.R_SHOULDER] = [round(-w / 2, 6), round(-alto_tronco * ca, 6),
+                         round(-alto_tronco * sa, 6)]
+    return w3
+
+
 def make_hand(rng, cx, cy):
     hand = []
     for i in range(21):
@@ -52,6 +84,7 @@ def build_cases():
     for k in range(3):
         frames.append({
             "pose": make_pose(rng, 0.5, 0.45 + 0.01 * k, 0.24),
+            "pose_mundo": make_pose_mundo(rng, 0.32, 0.10 + 0.02 * k),
             "left": make_hand(rng, 0.38, 0.60 - 0.03 * k),
             "right": make_hand(rng, 0.63, 0.58 - 0.02 * k),
         })
@@ -62,14 +95,16 @@ def build_cases():
     for k in range(3):
         frames.append({
             "pose": make_pose(rng, 0.32, 0.55 + 0.02 * k, 0.15),
+            "pose_mundo": make_pose_mundo(rng, 0.28, -0.05 * k),
             "left": None,
             "right": make_hand(rng, 0.40, 0.66 - 0.04 * k),
         })
     cases.append({"name": "una_mano", "frames": frames})
 
     for c in cases:
-        raw = [(f["pose"], f["left"], f["right"]) for f in c["frames"]]
-        norm = [sn.normalize_frame(p, l, r) for (p, l, r) in raw]
+        raw = [(f["pose"], f["pose_mundo"], f["left"], f["right"])
+               for f in c["frames"]]
+        norm = [sn.normalize_frame(p, pm, l, r) for (p, pm, l, r) in raw]
         assert all(f is not None for f in norm), c["name"]
         c["expected_frames"] = norm
         c["expected_mirror_frame0"] = sn.mirror_frame(norm[0])

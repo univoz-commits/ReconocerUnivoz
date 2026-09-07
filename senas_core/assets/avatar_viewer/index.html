@@ -15,7 +15,7 @@
 
   Como lo maneja Dart (ver avatar_bridge.dart):
     - Flutter llama a window.reproducirSecuencia(seqJson) con una lista de
-      frames, cada uno un array de 138 numeros (el mismo formato que usa
+      frames, cada uno un array de 152 numeros (el mismo formato que usa
       sign_norm.dart / dtw.dart para reconocer).
     - Esta pagina interpola entre frames y mueve los huesos del humanoid VRM
       en tiempo real.
@@ -33,11 +33,103 @@
       font: 12px sans-serif; color: #b00; background: #fff8;
       padding: 4px 8px; border-radius: 6px; display: none;
     }
+    /* Panel de calibracion. Herramienta de DESARROLLO: cuando los valores
+       queden fijos, copiarlos al objeto 'cal' de abajo y borrar este bloque
+       junto con el div #ajustes y su script (buscar "PANEL DE CALIBRACION"). */
+    #ajustes {
+      position: fixed; right: 6px; top: 6px; z-index: 20;
+      font: 11px/1.4 sans-serif; color: #222; background: #fffefeee;
+      padding: 6px 8px; border-radius: 8px; box-shadow: 0 1px 6px #0004;
+      width: 186px;
+    }
+    #ajustes.oculto #cuerpo { display: none; }
+    #ajustes label { display: block; margin-top: 4px; color: #555; }
+    #ajustes input[type=range] { width: 100%; margin: 0 0 2px; }
+    #ajustes select { width: 100%; font-size: 11px; margin-top: 3px; }
+    #ajustes b { font-size: 11px; }
+    #tog {
+      float: right; border: 0; background: #eee; border-radius: 4px;
+      font-size: 12px; padding: 0 7px; cursor: pointer;
+    }
+    .tabs { display: flex; gap: 4px; margin: 5px 0; }
+    .tabs button {
+      flex: 1; border: 0; background: #e9e9ef; border-radius: 4px;
+      font-size: 11px; padding: 4px 0; cursor: pointer;
+    }
+    .tabs button.on { background: #3f51b5; color: #fff; }
+    .fila { display: flex; gap: 4px; margin: 5px 0; }
+    .fila button {
+      flex: 1; border: 0; background: #e9e9ef; border-radius: 4px;
+      font-size: 10px; padding: 4px 0; cursor: pointer;
+    }
+    .fila button.on { background: #b71c1c; color: #fff; }
+    #bVer {
+      width: 100%; border: 0; background: #d7e3d7; border-radius: 4px;
+      font-size: 10px; padding: 4px; margin-top: 5px; cursor: pointer;
+    }
+    #salida {
+      width: 100%; height: 76px; margin-top: 4px; font: 9px monospace;
+      display: none; border: 1px solid #ccc; border-radius: 4px; resize: none;
+    }
+    .oculto2 { display: none; }
   </style>
 </head>
 <body>
   <canvas id="lienzo"></canvas>
   <div id="estado"></div>
+
+  <div id="ajustes">
+    <button id="tog">–</button>
+    <b>Editor de pose</b>
+    <div id="cuerpo">
+      <div class="fila">
+        <button id="bManual">Congelar datos</button>
+        <button id="bCam">Centrar cámara</button>
+      </div>
+
+      <div class="tabs" id="tabsVista">
+        <button data-vista="huesos">Huesos</button>
+        <button data-vista="calib">Calibrar</button>
+      </div>
+
+      <!-- Vista: edicion libre de cualquier hueso del rig -->
+      <div id="vHuesos">
+        <select id="selHueso"></select>
+        <label>Inclinación X: <span id="vRx"></span></label>
+        <input type="range" id="sRx" min="-3.15" max="3.15" step="0.01">
+        <label>Giro Y: <span id="vRy"></span></label>
+        <input type="range" id="sRy" min="-3.15" max="3.15" step="0.01">
+        <label>Doblez Z: <span id="vRz"></span></label>
+        <input type="range" id="sRz" min="-3.15" max="3.15" step="0.01">
+        <div class="fila">
+          <button id="bCero">Cero este</button>
+          <button id="bReposo">Reposo</button>
+        </div>
+      </div>
+
+      <!-- Vista: las constantes de calibracion del pipeline -->
+      <div id="vCalib" class="oculto2">
+        <div class="tabs" id="tabsLado">
+          <button data-lado="left">Izq</button>
+          <button data-lado="right">Der</button>
+        </div>
+        <label>Profundidad: <span id="vProf"></span></label>
+        <input type="range" id="sProf" min="-1.6" max="1.6" step="0.05">
+        <label>Giro de palma: <span id="vPal"></span></label>
+        <input type="range" id="sPal" min="-3.15" max="3.15" step="0.05">
+        <div class="fila">
+          <button id="bBrazo">Brazo <span id="vBrazo"></span></button>
+          <button id="bDedos">Dedos <span id="vDedos"></span></button>
+          <button id="bPalma">Palma <span id="vPalS"></span></button>
+        </div>
+        <label>Reposo (ambos): <span id="vRep"></span></label>
+        <input type="range" id="sRep" min="0" max="1.6" step="0.05">
+      </div>
+
+      <button id="bVer">Copiar pose</button>
+      <textarea id="salida" readonly></textarea>
+    </div>
+  </div>
 
   <script type="importmap">
   {
@@ -52,6 +144,7 @@
   <script type="module">
     import * as THREE from 'three';
     import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
     import { VRMLoaderPlugin, VRMUtils, VRMHumanBoneName } from '@pixiv/three-vrm';
 
     const $estado = document.getElementById('estado');
@@ -80,6 +173,28 @@
     // calculados para que entre desde la cintura hasta la cabeza.
     camera.position.set(0, 1.25, 1.3);
     camera.lookAt(0, 1.22, 0);
+
+    // Camara flotante: un dedo gira alrededor del avatar, dos dedos acercan
+    // y desplazan. Imprescindible para revisar una pose de perfil -- de
+    // frente es imposible ver si la mano quedo delante o detras del torso,
+    // que es justo el error que mas costo encontrar.
+    const orbita = new OrbitControls(camera, renderer.domElement);
+    orbita.target.set(0, 1.22, 0);
+    orbita.enableDamping = true;
+    orbita.dampingFactor = 0.1;
+    orbita.minDistance = 0.4;
+    orbita.maxDistance = 4.0;
+    orbita.update();
+
+    const camaraInicial = {
+      pos: camera.position.clone(),
+      target: orbita.target.clone(),
+    };
+    function resetCamara() {
+      camera.position.copy(camaraInicial.pos);
+      orbita.target.copy(camaraInicial.target);
+      orbita.update();
+    }
 
     scene.add(new THREE.AmbientLight(0xffffff, 1.1));
     const luzDirigida = new THREE.DirectionalLight(0xffffff, 0.9);
@@ -123,7 +238,11 @@
       // Postura de reposo: brazos un poco separados del cuerpo para que
       // el 2-bone IK de abajo tenga margen para moverlos sin chocar con
       // el torso.
+      // Mide las direcciones de reposo del rig ANTES de posar: el solucionador
+      // 3D las usa como referencia y necesita el modelo en T-pose.
+      medirRig();
       posarReposo();
+      poblarHuesos();
       window.parlanteVrmListo = true;
     }
 
@@ -153,33 +272,53 @@
       return vrm ? vrm.humanoid.getNormalizedBoneNode(nombre) : null;
     }
 
-    // Cuanto se bajan los brazos desde T-pose, en radianes. 1.57 seria
-    // pegados al torso; se deja un poco menos para que el IK tenga margen
-    // de maniobra sin que las manos atraviesen el cuerpo.
-    const kAnguloReposo = 1.40;
-
-    // Inclinacion del plano en que barre cada brazo, en radianes. Como el
-    // cuerpo se guarda en 2D (sign_norm.dart descarta la Z de MediaPipe Pose
-    // por ruidosa), esto es lo UNICO que decide si las manos pasan por
-    // delante del torso o por detras.
+    // ---------------------------------------------------------------------
+    // Calibracion del rig.
     //
-    // Va SEPARADO por brazo porque asi quedo la calibracion, aunque los dos
-    // valores resultaron simetricos: la inclinacion SI se espeja entre
-    // brazos. El error de las primeras versiones no era el signo sino la
-    // magnitud -- se empezo en 0.25 rad (14 grados) cuando hacian falta unos
-    // 60.
+    // Todo lo que hubo que ajustar a mano vive aca junto, por brazo. Se toca
+    // en vivo desde el panel de calibracion (buscar "PANEL DE CALIBRACION"),
+    // idealmente en la pantalla Espejo, donde uno mueve su propio brazo y ve
+    // el resultado al instante.
     //
-    // Calibrado a mano en el Huawei GFY LX1 con sliders en vivo: +1.05 /
-    // -1.05. Si hay que recalibrar en otro modelo o con otro rig, la forma
-    // rapida es volver a poner dos <input type="range"> que escriban aqui;
-    // deducir el valor leyendo el codigo no funciono.
-    const inclinacion = { left: 1.05, right: -1.05 };
+    //   prof     Inclinacion del plano en que barre el brazo, en radianes.
+    //            Como sign_norm.dart descarta la Z del cuerpo, esto es lo
+    //            UNICO que decide si la mano pasa por delante del torso o
+    //            por detras. Calibrado en el Huawei: +1.05 / -1.05.
+    //   zInv     Invierte el sentido de rotacion del brazo (arriba/abajo).
+    //            Se aplica tambien a la pose de reposo para que no se
+    //            contradigan.
+    //   dedos    Sentido de flexion de las falanges.
+    //   palmaInv Sentido del giro de la muneca.
+    //   palmaOff Donde queda el cero del giro de la muneca, en radianes.
+    //
+    // Deducir estos signos leyendo el codigo no funciono: el rig no se
+    // comporta como dice la intuicion sobre los ejes de VRM. Calibrar en el
+    // dispositivo es el camino corto.
+    // ---------------------------------------------------------------------
+    const cal = {
+      reposo: 1.40, // cuanto bajan los brazos desde T-pose (comun a los dos)
+      // El giro de muneca esta APAGADO: la formula de orientarMuneca da
+      // resultados no simetricos ante poses simetricas (medido: 53 grados en
+      // una mano y 155 en la otra con las dos palmas al frente), asi que no
+      // es cuestion de calibrar un cero sino de que el calculo esta mal.
+      // Una muneca neutra se ve mejor que una girada al azar. Poner en true
+      // solo cuando la formula este arreglada y verificada.
+      usarMuneca: false,
+      left:  { prof:  1.05, zInv: 1, dedos: -1, palmaInv: 1, palmaOff: 0 },
+      right: { prof: -1.22, zInv: 1, dedos:  1, palmaInv: 1, palmaOff: 0 },
+    };
 
-    // Permite fijar los valores desde Dart si alguna vez se quiere exponer
-    // la calibracion en la UI de la app.
-    window.ajustarInclinacion = function (izq, der) {
-      inclinacion.left = Number(izq);
-      inclinacion.right = Number(der);
+    // Permite fijar la calibracion desde Dart si alguna vez se quiere
+    // exponer en la UI de la app.
+    window.ajustarCalibracion = function (json) {
+      try {
+        const c = JSON.parse(json);
+        if (c.reposo != null) cal.reposo = Number(c.reposo);
+        for (const lado of ['left', 'right']) {
+          if (c[lado]) Object.assign(cal[lado], c[lado]);
+        }
+        posarReposo();
+      } catch (e) { /* json invalido: se ignora */ }
     };
 
     // Que brazos anima el visor. Muchas senas de LSM son de una sola mano;
@@ -198,13 +337,14 @@
     // Deja UN brazo colgando a un costado. Los signos estan verificados en
     // el dispositivo: ver la nota larga de mas abajo.
     function posarReposoBrazo(lado) {
-      const signo = lado === 'left' ? 1 : -1;
+      const signo = (lado === 'left' ? 1 : -1) * cal[lado].zInv;
       const up = bone(lado === 'left' ? VRMHumanBoneName.LeftUpperArm : VRMHumanBoneName.RightUpperArm);
       const lo = bone(lado === 'left' ? VRMHumanBoneName.LeftLowerArm : VRMHumanBoneName.RightLowerArm);
-      if (up) up.rotation.set(0, 0, signo * kAnguloReposo);
+      if (up) up.rotation.set(0, 0, signo * cal.reposo);
       if (lo) lo.rotation.set(0, 0, 0);
-      // Manos abiertas y relajadas.
+      // Manos abiertas, relajadas y con la palma sin girar.
       moverMano(lado, false, null);
+      orientarMuneca(lado, false, null);
     }
 
     function posarReposo() {
@@ -224,54 +364,105 @@
     }
 
     // ---------------------------------------------------------------------
-    // Orientacion del brazo a partir de las posiciones de codo y muneca que
-    // ya vienen en el frame. Antes esto era un IK de 2 huesos que ignoraba
-    // codoObjetivo y reconstruia el codo con ley de cosenos y proporciones
-    // humanas supuestas -- innecesario, porque sign_norm.dart guarda el codo
-    // real en kOffBody. Ahora cada hueso se orienta con su propio segmento:
-    // el brazo mira hacia el codo, el antebrazo hacia la muneca.
+    // Resolucion de brazos en 3D.
     //
-    // Sobre los ejes: el espacio de la seña tiene +x del hombro izquierdo al
-    // derecho (o sea hacia la DERECHA del avatar), mientras que la rotacion
-    // del brazo izquierdo crece hacia abajo con signo positivo -- ver la
-    // nota de posarReposo(), verificada en el dispositivo. De ahi el
-    // -signo*dx y el -dy de anguloBrazo(). Chequeo mental: con el codo justo
-    // debajo del hombro (dx=0, dy<0) sale +PI/2, que es la pose de reposo.
+    // Desde sign_norm 2.0.0 el cuerpo llega con profundidad. Antes era 2D y
+    // habia que inventarla con una constante por brazo (cal.prof), lo que
+    // nunca termino de funcionar: una mano adelantada y una mano pegada al
+    // hombro se proyectan igual, asi que el codo tenia que plegarse casi 180
+    // grados para colocarla, y el valor bueno de esa constante cambiaba
+    // segun la altura del brazo.
+    //
+    // El metodo no elige ningun signo a mano, que es lo que fallo una y otra
+    // vez con la version 2D. Al cargar el modelo se miden las direcciones de
+    // reposo del rig; de los datos se arma una base ortonormal del cuerpo de
+    // la persona; y la direccion de cada segmento se traslada de una base a
+    // la otra. Los signos salen de la medicion.
     // ---------------------------------------------------------------------
-    function resolverBrazo(lado, hombroLocal, codoObjetivo, munecaObjetivo) {
-      const pre = lado === 'left' ? VRMHumanBoneName.LeftUpperArm : VRMHumanBoneName.RightUpperArm;
-      const med = lado === 'left' ? VRMHumanBoneName.LeftLowerArm : VRMHumanBoneName.RightLowerArm;
-      const upper = bone(pre);
-      const lower = bone(med);
-      if (!upper || !lower) return;
+    const refRig = { left: null, right: null };
+    const avDerecha = new THREE.Vector3();
+    const avArriba = new THREE.Vector3(0, 1, 0);
+    // El avatar mira a +Z: es VRM 0.0 (mira a -Z) y la escena se voltea media
+    // vuelta al cargarlo, arriba.
+    const avFrente = new THREE.Vector3(0, 0, 1);
 
-      const signo = lado === 'left' ? 1 : -1;
-
-      // Convierte un segmento del espacio de la seña al angulo de rotacion
-      // sobre Z que le corresponde a ese lado. Devuelve null si el segmento
-      // es demasiado corto para tener direccion confiable (frames sin datos
-      // de cuerpo, o landmarks en cero): en ese caso no se toca el hueso y
-      // se queda como estaba, en vez de saltar a la horizontal.
-      function anguloBrazo(dx, dy) {
-        if (Math.sqrt(dx * dx + dy * dy) < 0.02) return null;
-        return Math.atan2(-dy, -signo * dx);
+    function medirRig() {
+      // Hay que medir con TODO en cero: la pose de reposo ya rota los brazos
+      // y falsearia las direcciones de referencia.
+      for (const n of Object.values(VRMHumanBoneName)) {
+        const h = bone(n); if (h) h.rotation.set(0, 0, 0);
       }
+      vrm.scene.updateMatrixWorld(true);
 
-      const angHombro = anguloBrazo(
-        codoObjetivo.x - hombroLocal.x, codoObjetivo.y - hombroLocal.y);
-      const angAntebrazo = anguloBrazo(
-        munecaObjetivo.x - codoObjetivo.x, munecaObjetivo.y - codoObjetivo.y);
-      if (angHombro === null) return;
+      const pL = new THREE.Vector3(), pR = new THREE.Vector3();
+      bone(VRMHumanBoneName.LeftUpperArm).getWorldPosition(pL);
+      bone(VRMHumanBoneName.RightUpperArm).getWorldPosition(pR);
+      avDerecha.subVectors(pR, pL).normalize();
 
-      // Ver 'inclinacion': sin Z en el cuerpo, este valor es el que pone la
-      // mano delante del torso o detras. Se calibra por brazo con el panel
-      // de ajustes.
-      upper.rotation.set(inclinacion[lado], 0, signo * angHombro);
-      // El antebrazo hereda la rotacion del brazo, asi que su angulo local es
-      // la diferencia entre ambos segmentos.
-      if (angAntebrazo !== null) {
-        lower.rotation.set(0, 0, signo * (angAntebrazo - angHombro));
+      for (const lado of ['left', 'right']) {
+        const up = bone(lado === 'left' ? VRMHumanBoneName.LeftUpperArm : VRMHumanBoneName.RightUpperArm);
+        const lo = bone(lado === 'left' ? VRMHumanBoneName.LeftLowerArm : VRMHumanBoneName.RightLowerArm);
+        const ma = bone(lado === 'left' ? VRMHumanBoneName.LeftHand : VRMHumanBoneName.RightHand);
+        if (!up || !lo || !ma) { refRig[lado] = null; continue; }
+        const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+        up.getWorldPosition(a); lo.getWorldPosition(b); ma.getWorldPosition(c);
+        refRig[lado] = {
+          dirUp: b.clone().sub(a).normalize(),
+          dirLo: c.clone().sub(b).normalize(),
+          qUp: up.getWorldQuaternion(new THREE.Quaternion()),
+          qLo: lo.getWorldQuaternion(new THREE.Quaternion()),
+          qPadre: up.parent.getWorldQuaternion(new THREE.Quaternion()),
+        };
       }
+    }
+
+    // Base del cuerpo. Desde sign_norm 2.0.0 el bloque de cuerpo YA viene
+    // proyectado sobre los ejes de la persona: +X a su derecha, +Y arriba,
+    // +Z al frente. Asi que no hay nada que deducir, la base es la identidad.
+    //
+    // No volver a calcularla de los hombros y caderas: daria +Z hacia atras
+    // y el avatar senaria en espejo de profundidad.
+    const kBase = {
+      pDer: new THREE.Vector3(1, 0, 0),
+      pArr: new THREE.Vector3(0, 1, 0),
+      pFre: new THREE.Vector3(0, 0, 1),
+    };
+    function baseCuerpo(p) {
+      // Solo comprueba que el frame tenga cuerpo utilizable.
+      return (Math.abs(p.hombroD.x - p.hombroI.x) > 1e-4) ? kBase : null;
+    }
+
+    function aBaseAvatar(v, base) {
+      return new THREE.Vector3()
+        .addScaledVector(avDerecha, v.dot(base.pDer))
+        .addScaledVector(avArriba, v.dot(base.pArr))
+        .addScaledVector(avFrente, v.dot(base.pFre))
+        .normalize();
+    }
+
+    function resolverBrazo(lado, base, hombro, codo, muneca) {
+      const r = refRig[lado];
+      if (!r) return;
+      const up = bone(lado === 'left' ? VRMHumanBoneName.LeftUpperArm : VRMHumanBoneName.RightUpperArm);
+      const lo = bone(lado === 'left' ? VRMHumanBoneName.LeftLowerArm : VRMHumanBoneName.RightLowerArm);
+
+      const vUp = codo.clone().sub(hombro);
+      const vLo = muneca.clone().sub(codo);
+      if (vUp.length() < 1e-4) return;
+
+      const dirUp = aBaseAvatar(vUp.normalize(), base);
+      const qU = new THREE.Quaternion().setFromUnitVectors(r.dirUp, dirUp);
+      const mundoU = qU.clone().multiply(r.qUp);
+      up.quaternion.copy(r.qPadre.clone().invert().multiply(mundoU));
+
+      if (vLo.length() < 1e-4) return;
+      const dirLo = aBaseAvatar(vLo.normalize(), base);
+      // El antebrazo ya se movio arrastrado por el brazo: su direccion de
+      // partida es la de reposo girada por qU.
+      const partida = r.dirLo.clone().applyQuaternion(qU);
+      const qL = new THREE.Quaternion().setFromUnitVectors(partida, dirLo);
+      const mundoL = qL.clone().multiply(qU).multiply(r.qLo);
+      lo.quaternion.copy(mundoU.clone().invert().multiply(mundoL));
     }
 
     // Los cuatro dedos largos van Proximal -> Intermediate -> Distal en
@@ -287,11 +478,29 @@
       ? ['Metacarpal', 'Proximal', 'Distal']
       : kFasesGenericas;
 
+    // Angulo entre dos vectores, en radianes. Siempre positivo: los dedos
+    // solo flexionan hacia un lado, asi que la magnitud alcanza y no hay
+    // signo que adivinar.
+    function _angulo(u, v) {
+      const c = _pto(_norm(u), _norm(v));
+      return Math.acos(Math.max(-1, Math.min(1, c)));
+    }
+
     function moverMano(lado, presente, puntos) {
       // puntos: 20 landmarks [x,y,z] relativos a la muneca, ya rotados y
-      // escalados por sign_norm.dart. Se usan solo para estimar el "curl"
-      // (que tan cerrado esta cada dedo), no la posicion exacta de cada
-      // falange -- es una aproximacion liviana, no una retarget completa.
+      // escalados por sign_norm.dart.
+      //
+      // Cada dedo llega con sus cuatro puntos (nudillo, y las tres
+      // articulaciones hasta la yema), asi que el angulo de cada falange se
+      // mide directo: es el angulo entre un segmento del dedo y el anterior.
+      //
+      // La version anterior resumia el dedo entero en un solo numero -- la
+      // distancia de la yema a la muneca -- y doblaba las tres falanges por
+      // igual. Con eso un dedo doblado solo en el nudillo y uno en garra
+      // daban la misma pose, y casi cualquier configuracion manual terminaba
+      // viendose como un puno a medio cerrar. En LSM la configuracion manual
+      // es la mitad del significado, asi que esa aproximacion se comia la
+      // seña.
       const dedos = [
         ['Thumb', [0, 1, 2, 3]],
         ['Index', [4, 5, 6, 7]],
@@ -299,26 +508,91 @@
         ['Ring', [12, 13, 14, 15]],
         ['Little', [16, 17, 18, 19]],
       ];
+      const kFlexMax = 1.6; // tope por falange, para que no se doble de mas
 
       for (const [nombreDedo, idx] of dedos) {
-        let curl = 0;
-        if (presente) {
-          // Distancia de la punta del dedo a la muneca (en el espacio ya
-          // normalizado por ancho de mano): dedo estirado = lejos, dedo
-          // cerrado = cerca. Se convierte a un angulo de flexion 0..~1.4rad
-          // por falange, igual para las tres falanges (aproximacion).
-          const punta = puntos[idx[idx.length - 1]];
-          const dist = Math.sqrt(punta[0] * punta[0] + punta[1] * punta[1] + punta[2] * punta[2]);
-          const largoEstirado = nombreDedo === 'Thumb' ? 0.55 : 0.95;
-          curl = Math.max(0, Math.min(1, 1 - dist / largoEstirado));
+        const fases = nombreDedo === 'Thumb' ? kFasesPulgar : kFasesGenericas;
+        let flex = [0, 0, 0];
+
+        if (presente && puntos) {
+          const nudillo = puntos[idx[0]];
+          const a = puntos[idx[1]];
+          const b = puntos[idx[2]];
+          const c = puntos[idx[3]];
+          // Segmentos: palma->nudillo, y luego cada falange.
+          const s0 = nudillo;              // la muneca es el origen
+          const s1 = _resta(a, nudillo);
+          const s2 = _resta(b, a);
+          const s3 = _resta(c, b);
+          if (_largo(s1) > 1e-5 && _largo(s2) > 1e-5 && _largo(s3) > 1e-5 &&
+              _largo(s0) > 1e-5) {
+            flex = [_angulo(s0, s1), _angulo(s1, s2), _angulo(s2, s3)]
+              .map((x) => Math.min(kFlexMax, x));
+          }
         }
-        const flex = curl * 1.3;
-        for (const fase of (nombreDedo === 'Thumb' ? kFasesPulgar : kFasesGenericas)) {
-          const nombreHueso = VRMHumanBoneName[`${lado === 'left' ? 'Left' : 'Right'}${nombreDedo}${fase}`];
+
+        for (let i = 0; i < fases.length; i++) {
+          const nombreHueso = VRMHumanBoneName[
+            `${lado === 'left' ? 'Left' : 'Right'}${nombreDedo}${fases[i]}`];
           const h = nombreHueso ? bone(nombreHueso) : null;
-          if (h) h.rotation.z = (lado === 'left' ? -1 : 1) * flex;
+          if (h) h.rotation.z = cal[lado].dedos * flex[i];
         }
       }
+    }
+
+    // ---------------------------------------------------------------------
+    // Orientacion de la palma.
+    //
+    // A diferencia de la profundidad del brazo, esto NO es una constante: los
+    // landmarks de la mano guardan XYZ completo relativo a la muneca, y
+    // sign_norm.dart los rota con el mismo angulo global de los hombros en
+    // vez de alinear cada mano por separado, asi que la orientacion real se
+    // conserva. La normal de la palma sale del producto cruz entre los
+    // nudillos del indice y del menique.
+    //
+    // El giro se aplica sobre X porque en el rig normalizado el brazo se
+    // extiende sobre ese eje, y el hueso de la mano hereda el marco del
+    // antebrazo: rotar en X es pronar/supinar sobre el eje del antebrazo,
+    // que es exactamente lo que hace girar la palma.
+    // ---------------------------------------------------------------------
+    const kIdxIndiceMcp = 4, kIdxMedioMcp = 8, kIdxMeniqueMcp = 16;
+
+    function _largo(v) { return Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); }
+    function _norm(v) { const m = _largo(v) || 1; return [v[0] / m, v[1] / m, v[2] / m]; }
+    function _cruz(a, b) {
+      return [a[1] * b[2] - a[2] * b[1],
+              a[2] * b[0] - a[0] * b[2],
+              a[0] * b[1] - a[1] * b[0]];
+    }
+    function _pto(a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+    function _resta(a, b) { return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]; }
+    function _escala(a, k) { return [a[0] * k, a[1] * k, a[2] * k]; }
+
+    function orientarMuneca(lado, presente, puntos) {
+      const mano = bone(lado === 'left'
+        ? VRMHumanBoneName.LeftHand : VRMHumanBoneName.RightHand);
+      if (!mano) return;
+      if (!cal.usarMuneca || !presente || !puntos) { mano.rotation.set(0, 0, 0); return; }
+
+      // Eje de la mano: muneca -> nudillo del medio.
+      const f = _norm(puntos[kIdxMedioMcp]);
+      // Normal de la palma.
+      let n = _cruz(puntos[kIdxIndiceMcp], puntos[kIdxMeniqueMcp]);
+      if (_largo(n) < 1e-4) return; // nudillos colineales: sin dato utilizable
+      n = _norm(n);
+
+      // Base perpendicular al eje de los dedos, tomando "arriba" como cero.
+      let ref = _resta([0, 1, 0], _escala(f, _pto([0, 1, 0], f)));
+      if (_largo(ref) < 1e-3) return; // mano apuntando justo arriba o abajo
+      ref = _norm(ref);
+      const bi = _cruz(f, ref);
+
+      // Componente de la normal perpendicular al eje: su angulo ES el giro.
+      const np = _norm(_resta(n, _escala(f, _pto(n, f))));
+      const giro = Math.atan2(_pto(np, bi), _pto(np, ref));
+
+      mano.rotation.set(
+        cal[lado].palmaInv * (giro + cal[lado].palmaOff), 0, 0);
     }
 
     function moverExpresionBasica(t) {
@@ -334,8 +608,14 @@
     // ---------------------------------------------------------------------
     // Reproduccion de una secuencia de frames (ver dtw.dart / Template.seq)
     // ---------------------------------------------------------------------
-    const kOffBody = 0, kOffLocL = 12, kOffLocR = 14, kOffPresL = 16, kOffPresR = 17,
-      kOffShapeL = 18, kOffShapeR = 78;
+    // Layout del vector normalizado, version 2.0.0 (152 dims). Ver
+    // lib/sign_norm.dart. El cuerpo son 8 puntos x (x, y, z): hombros,
+    // codos, munecas y caderas.
+    const kOffBody = 0, kOffLocL = 24, kOffLocR = 27, kOffPresL = 30,
+      kOffPresR = 31, kOffShapeL = 32, kOffShapeR = 92, kFrameDim = 152;
+    // Indices dentro del bloque de cuerpo, en PUNTOS (no en dimensiones).
+    const kPtHombroI = 0, kPtHombroD = 1, kPtCodoI = 2, kPtCodoD = 3,
+      kPtMunI = 4, kPtMunD = 5, kPtCaderaI = 6, kPtCaderaD = 7;
 
     let colaFrames = [];
     let frameActual = 0;
@@ -344,50 +624,65 @@
     // a kTFrames=32 muestras por seña y se interpolan igual.
 
     function frameA3Puntos(v) {
-      const codoI = { x: v[kOffBody + 0], y: v[kOffBody + 1] };
-      const codoD = { x: v[kOffBody + 2], y: v[kOffBody + 3] };
-      const munI = { x: v[kOffLocL], y: v[kOffLocL + 1] };
-      const munD = { x: v[kOffLocR], y: v[kOffLocR + 1] };
+      const pt = (i) => new THREE.Vector3(
+        v[kOffBody + i * 3], v[kOffBody + i * 3 + 1], v[kOffBody + i * 3 + 2]);
+
       const presI = v[kOffPresL] >= 0.5;
       const presD = v[kOffPresR] >= 0.5;
+      // Munecas: hay DOS fuentes. kOffLoc* viene del detector de manos y es
+      // mas preciso, pero llega en cero cuando esa mano no se detecto -- y el
+      // cero es el centro entre los hombros, asi que el brazo se doblaba
+      // apuntando al pecho. Las munecas del bloque de cuerpo existen siempre
+      // que se vea el cuerpo. Se usa la de la mano si esta, si no la del
+      // cuerpo.
+      const munI = presI
+        ? new THREE.Vector3(v[kOffLocL], v[kOffLocL + 1], v[kOffLocL + 2])
+        : pt(kPtMunI);
+      const munD = presD
+        ? new THREE.Vector3(v[kOffLocR], v[kOffLocR + 1], v[kOffLocR + 2])
+        : pt(kPtMunD);
+
       const manoI = [];
       const manoD = [];
       for (let j = 0; j < 20; j++) {
         manoI.push([v[kOffShapeL + j * 3], v[kOffShapeL + j * 3 + 1], v[kOffShapeL + j * 3 + 2]]);
         manoD.push([v[kOffShapeR + j * 3], v[kOffShapeR + j * 3 + 1], v[kOffShapeR + j * 3 + 2]]);
       }
-      return { codoI, codoD, munI, munD, presI, presD, manoI, manoD };
+      return {
+        hombroI: pt(kPtHombroI), hombroD: pt(kPtHombroD),
+        codoI: pt(kPtCodoI), codoD: pt(kPtCodoD),
+        caderaI: pt(kPtCaderaI), caderaD: pt(kPtCaderaD),
+        munI, munD, presI, presD, manoI, manoD,
+      };
     }
 
     // Un codo nunca puede estar en el origen: por construccion de
-    // sign_norm.dart, (0,0) es el punto medio entre los hombros. Cuando una
-    // sena es de una sola mano, los landmarks del brazo que no participa
-    // llegan en cero, y ese cero se colaba como una posicion valida --
-    // atan2 daba PI y el brazo terminaba rotado 180 grados, por arriba y
-    // hacia atras. Si el codo cae ahi, el dato no existe y el brazo va a
-    // reposo.
+    // sign_norm.dart, el origen es el punto medio entre los hombros. Cuando
+    // una sena es de una sola mano, los landmarks del brazo que no participa
+    // llegan en cero, y ese cero se colaba como posicion valida. Si el codo
+    // cae ahi, el dato no existe y el brazo va a reposo.
     function brazoTieneDatos(codo) {
       return Math.sqrt(codo.x * codo.x + codo.y * codo.y) > 0.05;
     }
 
     function aplicarFrame(v) {
-      if (!vrm) return;
+      if (!vrm || modoManual) return;
       const p = frameA3Puntos(v);
-      // Hombros en el espacio normalizado: por construccion de
-      // sign_norm.dart, el hombro izquierdo esta en (-0.5, 0) y el derecho
-      // en (0.5, 0) -- ver la nota grande de avatar_bridge.dart.
+      const base = baseCuerpo(p);
       if (manosActivas.left) {
-        if (brazoTieneDatos(p.codoI)) {
-          resolverBrazo('left', { x: -0.5, y: 0 }, p.codoI, p.munI);
+        if (base && brazoTieneDatos(p.codoI)) {
+          resolverBrazo('left', base, p.hombroI, p.codoI, p.munI);
           moverMano('left', p.presI, p.manoI);
+          orientarMuneca('left', p.presI, p.manoI);
         } else {
           posarReposoBrazo('left');
         }
       }
       if (manosActivas.right) {
-        if (brazoTieneDatos(p.codoD)) {
-          resolverBrazo('right', { x: 0.5, y: 0 }, p.codoD, p.munD);
+        if (base && brazoTieneDatos(p.codoD)) {
+          resolverBrazo('right', base, p.hombroD, p.codoD, p.munD);
           moverMano('right', p.presD, p.manoD);
+          orientarMuneca('right', p.presD, p.manoD);
         } else {
           posarReposoBrazo('right');
         }
@@ -404,6 +699,219 @@
       frameActual = 0;
       reproduciendo = colaFrames.length > 0;
     };
+
+    // Modo espejo: aplica UN frame al instante, sin cola ni interpolacion.
+    // Lo alimenta la camara en vivo (pantalla_espejo.dart). Corta cualquier
+    // reproduccion en curso para que no peleen por los mismos huesos.
+    window.aplicarFrameVivo = function (frameJson) {
+      if (!vrm) return;
+      let v;
+      try {
+        v = JSON.parse(frameJson);
+      } catch (e) {
+        return; // un frame suelto que no parsea no merece cartel de error
+      }
+      if (!Array.isArray(v) || v.length < kFrameDim) return;
+      reproduciendo = false;
+      colaFrames = [];
+      aplicarFrame(v);
+    };
+
+    // ---------------------------------------------------------------------
+    // PANEL DE CALIBRACION (desarrollo).
+    //
+    // Escribe directo sobre 'cal'. Para quitarlo cuando los valores queden
+    // fijos: borrar este bloque, el div #ajustes del body y su CSS.
+    // ---------------------------------------------------------------------
+    let ladoSel = 'right';
+    let modoManual = false;
+    let huesoSel = null;
+    const $ = (id) => document.getElementById(id);
+
+    // Nombres de huesos en espanol. El spec VRM los da en camelCase y en
+    // ingles (leftIndexProximal); se traducen partiendo el nombre en vez de
+    // con una tabla de 54 entradas, asi un modelo con huesos extra tampoco
+    // queda sin etiqueta.
+    const kLadoEs = { left: 'izq.', right: 'der.' };
+    const kDedoEs = { thumb: 'Pulgar', index: 'Índice', middle: 'Medio',
+                      ring: 'Anular', little: 'Meñique' };
+    const kFalangeEs = { metacarpal: 'metacarpo', proximal: 'proximal',
+                         intermediate: 'media', distal: 'distal' };
+    const kParteEs = {
+      hips: 'Cadera', spine: 'Columna', chest: 'Pecho', upperchest: 'Pecho alto',
+      neck: 'Cuello', head: 'Cabeza', jaw: 'Mandíbula', eye: 'Ojo',
+      shoulder: 'Hombro', upperarm: 'Brazo', lowerarm: 'Antebrazo', hand: 'Mano',
+      upperleg: 'Muslo', lowerleg: 'Pierna', foot: 'Pie', toes: 'Dedos del pie',
+    };
+
+    function etiquetaHueso(nombre) {
+      const partes = nombre.replace(/([A-Z])/g, ' $1').trim().split(' ');
+      let lado = '';
+      if (partes[0] === 'left' || partes[0] === 'right') {
+        lado = ' ' + kLadoEs[partes.shift()];
+      }
+      const resto = partes.join('').toLowerCase();
+      for (const [clave, esp] of Object.entries(kDedoEs)) {
+        if (resto.startsWith(clave)) {
+          const f = resto.slice(clave.length);
+          return `${esp}${lado} · ${kFalangeEs[f] || f}`;
+        }
+      }
+      return (kParteEs[resto] || nombre) + lado;
+    }
+
+    // Los huesos que el rig realmente tiene. Se llena al cargar el VRM
+    // porque depende del modelo: un avatar sin dedos no debe ofrecerlos.
+    function poblarHuesos() {
+      const sel = $('selHueso');
+      sel.innerHTML = '';
+      for (const nombre of Object.values(VRMHumanBoneName)) {
+        if (!bone(nombre)) continue;
+        const o = document.createElement('option');
+        o.value = nombre;
+        o.textContent = etiquetaHueso(nombre);
+        sel.appendChild(o);
+      }
+      huesoSel = sel.value || null;
+      pintarHueso();
+    }
+
+    function pintarHueso() {
+      const h = huesoSel ? bone(huesoSel) : null;
+      const r = h ? h.rotation : { x: 0, y: 0, z: 0 };
+      $('sRx').value = r.x; $('vRx').textContent = r.x.toFixed(2);
+      $('sRy').value = r.y; $('vRy').textContent = r.y.toFixed(2);
+      $('sRz').value = r.z; $('vRz').textContent = r.z.toFixed(2);
+    }
+
+    function escribirHueso() {
+      const h = huesoSel ? bone(huesoSel) : null;
+      if (!h) return;
+      h.rotation.set(
+        Number($('sRx').value), Number($('sRy').value), Number($('sRz').value));
+      $('vRx').textContent = Number($('sRx').value).toFixed(2);
+      $('vRy').textContent = Number($('sRy').value).toFixed(2);
+      $('vRz').textContent = Number($('sRz').value).toFixed(2);
+    }
+
+    for (const id of ['sRx', 'sRy', 'sRz']) {
+      $(id).addEventListener('input', escribirHueso);
+    }
+    $('selHueso').addEventListener('change', () => {
+      huesoSel = $('selHueso').value;
+      pintarHueso();
+    });
+    $('bCero').addEventListener('click', () => {
+      const h = huesoSel ? bone(huesoSel) : null;
+      if (h) h.rotation.set(0, 0, 0);
+      pintarHueso();
+    });
+    $('bReposo').addEventListener('click', () => { posarReposo(); pintarHueso(); });
+    $('bCam').addEventListener('click', resetCamara);
+
+    // Congelar corta aplicarFrame: sin esto, cualquier hueso de brazo o mano
+    // que se ajuste a mano lo pisa el frame siguiente, 20 veces por segundo.
+    $('bManual').addEventListener('click', () => {
+      modoManual = !modoManual;
+      $('bManual').classList.toggle('on', modoManual);
+      $('bManual').textContent = modoManual ? 'Datos congelados' : 'Congelar datos';
+    });
+
+    function pintarPanel() {
+      const c = cal[ladoSel];
+      $('sProf').value = c.prof;
+      $('vProf').textContent = c.prof.toFixed(2);
+      $('sPal').value = c.palmaOff;
+      $('vPal').textContent = c.palmaOff.toFixed(2);
+      $('sRep').value = cal.reposo;
+      $('vRep').textContent = cal.reposo.toFixed(2);
+      $('vBrazo').textContent = c.zInv > 0 ? '+' : '−';
+      $('vDedos').textContent = c.dedos > 0 ? '+' : '−';
+      $('vPalS').textContent = c.palmaInv > 0 ? '+' : '−';
+      for (const b of document.querySelectorAll('#tabsLado button')) {
+        b.classList.toggle('on', b.dataset.lado === ladoSel);
+      }
+    }
+
+    for (const b of document.querySelectorAll('#tabsLado button')) {
+      b.addEventListener('click', () => { ladoSel = b.dataset.lado; pintarPanel(); });
+    }
+    for (const b of document.querySelectorAll('#tabsVista button')) {
+      b.addEventListener('click', () => {
+        const v = b.dataset.vista;
+        $('vHuesos').classList.toggle('oculto2', v !== 'huesos');
+        $('vCalib').classList.toggle('oculto2', v !== 'calib');
+        for (const o of document.querySelectorAll('#tabsVista button')) {
+          o.classList.toggle('on', o === b);
+        }
+        if (v === 'huesos') pintarHueso();
+      });
+    }
+    $('sProf').addEventListener('input', () => {
+      cal[ladoSel].prof = Number($('sProf').value);
+      $('vProf').textContent = cal[ladoSel].prof.toFixed(2);
+    });
+    $('sPal').addEventListener('input', () => {
+      cal[ladoSel].palmaOff = Number($('sPal').value);
+      $('vPal').textContent = cal[ladoSel].palmaOff.toFixed(2);
+    });
+    $('sRep').addEventListener('input', () => {
+      cal.reposo = Number($('sRep').value);
+      $('vRep').textContent = cal.reposo.toFixed(2);
+    });
+    // Los tres invertibles. El del brazo re-aplica la pose de reposo para
+    // que no quede contradiciendo a la reproduccion.
+    $('bBrazo').addEventListener('click', () => {
+      cal[ladoSel].zInv *= -1; posarReposoBrazo(ladoSel); pintarPanel();
+    });
+    $('bDedos').addEventListener('click', () => {
+      cal[ladoSel].dedos *= -1; pintarPanel();
+    });
+    $('bPalma').addEventListener('click', () => {
+      cal[ladoSel].palmaInv *= -1; pintarPanel();
+    });
+    $('tog').addEventListener('click', () => {
+      const p = $('ajustes');
+      p.classList.toggle('oculto');
+      $('tog').textContent = p.classList.contains('oculto') ? '+' : '–';
+    });
+
+    // Arma el volcado completo del estado actual: la calibracion como
+    // literal para pegar en 'cal', y todos los huesos fuera de cero con sus
+    // tres angulos.
+    function volcarPose() {
+      const f = (o) => `{ prof: ${o.prof.toFixed(2)}, zInv: ${o.zInv}, ` +
+        `dedos: ${o.dedos}, palmaInv: ${o.palmaInv}, ` +
+        `palmaOff: ${o.palmaOff.toFixed(2)} }`;
+      const lineas = [
+        `reposo: ${cal.reposo.toFixed(2)},`,
+        `left:  ${f(cal.left)},`,
+        `right: ${f(cal.right)},`,
+        '--- huesos movidos (x, y, z en radianes) ---',
+      ];
+      for (const nombre of Object.values(VRMHumanBoneName)) {
+        const h = bone(nombre);
+        if (!h) continue;
+        const r = h.rotation;
+        if (Math.abs(r.x) < 0.01 && Math.abs(r.y) < 0.01 && Math.abs(r.z) < 0.01) continue;
+        lineas.push(`${nombre}: ${r.x.toFixed(3)}, ${r.y.toFixed(3)}, ${r.z.toFixed(3)}`);
+      }
+      return lineas.join('\n');
+    }
+
+    // Manda la pose a Dart, que la copia al portapapeles. Transcribir a mano
+    // desde un textarea en un telefono no es viable, y ese era justo el
+    // cuello de botella del flujo: componer la pose es facil, sacarla no.
+    // El textarea se sigue mostrando como confirmacion visual.
+    $('bVer').addEventListener('click', () => {
+      const texto = volcarPose();
+      $('salida').value = texto;
+      $('salida').style.display = 'block';
+      if (window.SenasChannel) window.SenasChannel.postMessage('pose:' + texto);
+    });
+
+    document.querySelector('#tabsVista button').classList.add('on');
+    pintarPanel();
 
     let ultimoT = 0;
     let acumMs = 0;
@@ -429,6 +937,7 @@
       }
 
       moverExpresionBasica(t / 1000);
+      orbita.update();
       // three-vrm NO aplica solo lo que se escribe en los huesos
       // normalizados ni en el expressionManager. vrm.update() es lo que
       // baja las rotaciones al rig real y los valores de expresion a los

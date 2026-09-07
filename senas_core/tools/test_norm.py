@@ -43,8 +43,9 @@ def test_golden():
     check(data["norm_version"] == sn.NORM_VERSION,
           "version %s coincide" % data["norm_version"])
     for c in data["cases"]:
-        raw = [(f["pose"], f["left"], f["right"]) for f in c["frames"]]
-        got = [sn.normalize_frame(p, l, r) for (p, l, r) in raw]
+        raw = [(f["pose"], f["pose_mundo"], f["left"], f["right"])
+               for f in c["frames"]]
+        got = [sn.normalize_frame(p, pm, l, r) for (p, pm, l, r) in raw]
         d = max(max_diff(g, e) for g, e in zip(got, c["expected_frames"]))
         check(d < TOL, "%s: frames (max diff %.2e)" % (c["name"], d))
         d = max_diff(sn.mirror_frame(got[0]), c["expected_mirror_frame0"])
@@ -67,40 +68,61 @@ def _transformar(pts, dx, dy, s, ang, cx=0.5, cy=0.5):
     return out
 
 
+def _transformar_mundo(pts, s, giro):
+    """Escala el esqueleto metrico y lo GIRA sobre el eje vertical.
+
+    Girar a la persona es la prueba fuerte de la version 2.0.0: el bloque de
+    cuerpo se proyecta sobre una base sacada del propio esqueleto, asi que
+    ponerse de perfil no deberia cambiar el vector.
+    """
+    cg, sg = math.cos(giro), math.sin(giro)
+    out = []
+    for p in pts:
+        x, y, z = p[0] * s, p[1] * s, p[2] * s
+        out.append([x * cg + z * sg, y, -x * sg + z * cg])
+    return out
+
+
 def test_invariancia():
     print("test_invariancia")
     rng = random.Random(11)
     pose = gen_golden.make_pose(rng, 0.5, 0.45, 0.24)
+    mundo = gen_golden.make_pose_mundo(rng, 0.32, 0.12)
     left = gen_golden.make_hand(rng, 0.38, 0.60)
     right = gen_golden.make_hand(rng, 0.63, 0.58)
-    base = sn.normalize_frame(pose, left, right)
+    base = sn.normalize_frame(pose, mundo, left, right)
 
-    for nombre, (dx, dy, s, ang) in {
-        "trasladado":  (0.15, -0.10, 1.0, 0.0),
-        "mas lejos":   (0.0, 0.0, 0.55, 0.0),
-        "mas cerca":   (0.0, 0.0, 1.7, 0.0),
-        "inclinado":   (0.0, 0.0, 1.0, 0.35),
-        "todo junto":  (-0.12, 0.08, 0.7, -0.25),
+    for nombre, (dx, dy, s, ang, giro) in {
+        "trasladado":  (0.15, -0.10, 1.0, 0.0, 0.0),
+        "mas lejos":   (0.0, 0.0, 0.55, 0.0, 0.0),
+        "mas cerca":   (0.0, 0.0, 1.7, 0.0, 0.0),
+        "inclinado":   (0.0, 0.0, 1.0, 0.35, 0.0),
+        "girado 40":   (0.0, 0.0, 1.0, 0.0, 0.70),
+        "todo junto":  (-0.12, 0.08, 0.7, -0.25, -0.5),
     }.items():
         p2 = _transformar(pose, dx, dy, s, ang)
+        m2 = _transformar_mundo(mundo, s, giro)
         l2 = _transformar(left, dx, dy, s, ang)
         r2 = _transformar(right, dx, dy, s, ang)
-        got = sn.normalize_frame(p2, l2, r2)
-        d = max_diff(got, base)
-        check(d < 1e-4, "%s produce el mismo vector (max diff %.2e)" % (nombre, d))
+        got = sn.normalize_frame(p2, m2, l2, r2)
+        # Solo el bloque de cuerpo: la forma de las manos se calcula en
+        # coordenadas de imagen y girar a la persona si la cambia.
+        d = max(abs(got[i] - base[i]) for i in range(sn.OFF_PRES_L))
+        check(d < 1e-4, "%s: cuerpo identico (max diff %.2e)" % (nombre, d))
 
 
 def test_espejo_doble():
     print("test_espejo_doble")
     rng = random.Random(3)
     pose = gen_golden.make_pose(rng, 0.5, 0.45, 0.24)
+    mundo = gen_golden.make_pose_mundo(rng, 0.32, 0.08)
     left = gen_golden.make_hand(rng, 0.38, 0.60)
     right = gen_golden.make_hand(rng, 0.63, 0.58)
-    v = sn.normalize_frame(pose, left, right)
+    v = sn.normalize_frame(pose, mundo, left, right)
     d = max_diff(sn.mirror_frame(sn.mirror_frame(v)), v)
     check(d < 1e-9, "doble espejo devuelve el original (max diff %.2e)" % d)
 
-    solo_der = sn.normalize_frame(pose, None, right)
+    solo_der = sn.normalize_frame(pose, mundo, None, right)
     esp = sn.mirror_frame(solo_der)
     check(esp[sn.OFF_PRES_L] == 1.0 and esp[sn.OFF_PRES_R] == 0.0,
           "el espejo cruza la presencia de manos")
@@ -110,9 +132,10 @@ def test_empaquetado():
     print("test_empaquetado")
     rng = random.Random(5)
     pose = gen_golden.make_pose(rng, 0.5, 0.45, 0.24)
+    mundo = gen_golden.make_pose_mundo(rng, 0.32, 0.05)
     left = gen_golden.make_hand(rng, 0.38, 0.60)
     right = gen_golden.make_hand(rng, 0.63, 0.58)
-    seq = sn.normalize_sequence([(pose, left, right)] * 4)
+    seq = sn.normalize_sequence([(pose, mundo, left, right)] * 4)
     blob = sn.pack_f16(seq)
     back = sn.unpack_f16(blob)
     d = max(max_diff(a, b) for a, b in zip(seq, back))

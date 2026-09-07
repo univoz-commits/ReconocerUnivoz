@@ -4,7 +4,7 @@ No entrena nada. Agregar una sena nueva es agregar plantillas, y funciona
 con pocas muestras por sena. Es la fase 1: sirve para tener el sistema
 completo de punta a punta antes de meter un encoder entrenado.
 
-La distancia entre dos frames NO es euclidiana plana. Los 138 numeros no
+La distancia entre dos frames NO es euclidiana plana. Los 152 numeros no
 valen lo mismo: la forma de la mano ocupa 120 dimensiones y la ubicacion
 solo 4, asi que una euclidiana normal dejaria que la forma se comiera todo
 el peso. Aqui cada bloque se promedia por su numero de dimensiones y luego
@@ -16,6 +16,25 @@ import math
 from sign_norm import (
     FRAME_DIM, OFF_BODY, OFF_LOC_L, OFF_LOC_R,
     OFF_PRES_L, OFF_PRES_R, OFF_SHAPE_L, OFF_SHAPE_R,
+)
+
+# Dimensiones del bloque de cuerpo que entran en la distancia: codos, munecas
+# y caderas, solo X e Y.
+#
+# Quedan fuera los hombros, cuya X e Y son constantes por construccion (-0.5 y
+# +0.5) y sumarian siempre cero, y TODAS las Z del cuerpo: la profundidad que
+# estima MediaPipe Pose es ruidosa, sirve para animar al avatar pero al
+# comparar dos senas mete mas error que senal.
+#
+# Asi el clasificador compara EXACTAMENTE las mismas 12 dimensiones de cuerpo
+# que antes del cambio a 3D en la version 2.0.0 de sign_norm.
+BODY_DIST_DIMS = (
+    6, 7,    # codo izq
+    9, 10,   # codo der
+    12, 13,  # muneca izq
+    15, 16,  # muneca der
+    18, 19,  # cadera izq
+    21, 22,  # cadera der
 )
 
 N_BODY = 12
@@ -41,7 +60,7 @@ def frame_distance(a, b):
     acc = 0.0
 
     s = 0.0
-    for i in range(OFF_BODY, OFF_BODY + N_BODY):
+    for i in BODY_DIST_DIMS:
         d = a[i] - b[i]
         s += d * d
     acc += W_BODY * s / N_BODY
@@ -55,6 +74,8 @@ def frame_distance(a, b):
         # aparece a media sena, por eso el umbral en vez de comparar con 1.0
         ha, hb = pa >= 0.5, pb >= 0.5
         if ha and hb:
+            # Solo X e Y: la Z de la muneca es profundidad de cuerpo y queda
+            # fuera por el mismo motivo que BODY_DIST_DIMS.
             d0 = a[off_loc] - b[off_loc]
             d1 = a[off_loc + 1] - b[off_loc + 1]
             acc += W_LOC * (d0 * d0 + d1 * d1) / 2.0

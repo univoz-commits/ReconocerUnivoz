@@ -5,6 +5,7 @@ import 'muestras_locales.dart';
 import 'pantalla_ajustes.dart';
 import 'pantalla_avatar.dart';
 import 'pantalla_captura.dart';
+import 'pantalla_espejo.dart';
 import 'pantalla_muestras.dart';
 import 'pantalla_sync.dart';
 import 'skeleton_painter.dart';
@@ -176,6 +177,14 @@ class _PantallaMenuState extends State<PantallaMenu> {
             detalle:
                 'Escribí, elegí de una lista o decí una palabra en voz alta y un avatar hace la seña.',
             onTap: () => _ir(const PantallaAvatar()),
+          ),
+          _tarjeta(
+            icono: Icons.flip_camera_android_outlined,
+            color: Colors.pink,
+            titulo: 'Espejo',
+            detalle:
+                'Movéte frente a la cámara y el avatar te copia en vivo. Sirve para ver si el seguimiento te lee bien.',
+            onTap: () => _ir(const PantallaEspejo()),
           ),
           _tarjeta(
             icono: Icons.tune,

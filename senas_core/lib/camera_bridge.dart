@@ -1,7 +1,7 @@
 /// Puente de Dart hacia la camara nativa.
 ///
 /// Recibe landmarks crudos por EventChannel y los convierte en frames
-/// normalizados de 138 dimensiones, listos para el clasificador.
+/// normalizados de 152 dimensiones, listos para el clasificador.
 library camera_bridge;
 
 import 'dart:async';
@@ -30,8 +30,20 @@ class LandmarkFrame {
   /// Milisegundos, estrictamente creciente.
   final int timestampMs;
 
-  /// 33 landmarks de pose, cada uno [x, y, z, visibility]. Null si no hubo.
+  /// 33 landmarks de pose en coordenadas de imagen, cada uno
+  /// [x, y, z, visibility]. Null si no hubo. Son los que se pintan sobre el
+  /// preview de la camara.
   final List<List<double>>? pose;
+
+  /// 33 landmarks de pose en METROS, cada uno [x, y, z], con origen en el
+  /// punto medio de las caderas. Es el esqueleto 3D real.
+  ///
+  /// Existe aparte de [pose] porque la Z de las coordenadas de imagen es
+  /// solo una profundidad relativa aproximada: se midio incoherente entre
+  /// puntos vecinos (un antebrazo de 0.8 anchos de hombro con 3.5 de
+  /// recorrido en Z), asi que no sirve para reconstruir una postura. La
+  /// normalizacion usa esta y no aquella.
+  final List<List<double>>? poseMundo;
 
   /// 21 landmarks por mano, cada uno [x, y, z]. Null si esa mano no aparecio.
   final List<List<double>>? left;
@@ -40,6 +52,7 @@ class LandmarkFrame {
   const LandmarkFrame({
     required this.timestampMs,
     this.pose,
+    this.poseMundo,
     this.left,
     this.right,
   });
@@ -49,6 +62,7 @@ class LandmarkFrame {
   factory LandmarkFrame.fromMap(Map<Object?, Object?> map,
       {bool swapHands = false}) {
     final pose = _desempacar(map['pose'], 4);
+    final poseMundo = _desempacar(map['poseMundo'], 3);
     var izq = _desempacar(map['left'], 3);
     var der = _desempacar(map['right'], 3);
     if (swapHands) {
@@ -59,6 +73,7 @@ class LandmarkFrame {
     return LandmarkFrame(
       timestampMs: (map['t'] as num).toInt(),
       pose: pose,
+      poseMundo: poseMundo,
       left: izq,
       right: der,
     );
@@ -79,9 +94,14 @@ class LandmarkFrame {
     );
   }
 
-  /// Vector de 138 dimensiones, o null si el frame no sirve.
-  List<double>? normalize() =>
-      pose == null ? null : normalizeFrame(pose!, left: left, right: right);
+  /// Vector de 152 dimensiones, o null si el frame no sirve.
+  ///
+  /// Necesita [poseMundo]: sin el esqueleto metrico no hay forma de
+  /// reconstruir la postura. Si el nativo no lo manda (version vieja del
+  /// plugin), devuelve null.
+  List<double>? normalize() => (pose == null || poseMundo == null)
+      ? null
+      : normalizeFrame(pose!, poseMundo!, left: left, right: right);
 
   bool get tieneAlgunaMano => left != null || right != null;
 }
@@ -177,7 +197,7 @@ class CameraBridge {
         .asBroadcastStream();
   }
 
-  /// Solo los frames normalizables, ya como vectores de 138 dimensiones.
+  /// Solo los frames normalizables, ya como vectores de 152 dimensiones.
   Stream<({int t, List<double> vec})> get vectores => frames
       .map((f) => (t: f.timestampMs, vec: f.normalize()))
       .where((e) => e.vec != null)

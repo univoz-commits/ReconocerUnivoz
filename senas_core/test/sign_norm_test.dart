@@ -63,6 +63,7 @@ void main() {
         final f = rawFrame as Map<String, dynamic>;
         final v = normalizeFrame(
           _parseLandmarks(f['pose']),
+          _parseLandmarks(f['pose_mundo']),
           left: f['left'] == null ? null : _parseLandmarks(f['left']),
           right: f['right'] == null ? null : _parseLandmarks(f['right']),
         );
