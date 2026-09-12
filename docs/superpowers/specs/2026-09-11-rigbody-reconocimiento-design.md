@@ -37,9 +37,9 @@ validez. Stream fusionado alimenta normalización; preview alimenta UI.
 
 ### Validación
 
-Confianza, finitud, rango, conexiones, longitudes óseas y outliers. MAD y
-One Euro son la siguiente mejora medible; el visor actual ya tiene low-pass y
-rate limit visual.
+Confianza, finitud, rango, conexiones, longitudes óseas y outliers. El visor
+aplica MAD, One Euro y rate limit a RenderState; la comparación cuantitativa
+contra baseline sigue pendiente con cámara real.
 
 ### Mano
 

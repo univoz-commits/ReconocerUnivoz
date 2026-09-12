@@ -65,8 +65,8 @@ clasificador reciba frames distintos de los usados por el avatar.
 | Marco de mano y pulgar calibrable | implementada |
 | IK 3D de dos huesos | implementada |
 | Low-pass visual y rate limit | implementada |
-| MAD formal con ventana robusta | pendiente |
-| One Euro adaptativo | pendiente |
+| MAD formal con ventana robusta | implementada para RenderState |
+| One Euro adaptativo | implementada para RenderState |
 | Kalman por track | pendiente |
 | Hungarian general | pendiente; hoy hay asignación uno-a-uno acotada |
 | Calibración antropométrica persistible | parcial: calibración de rig |
@@ -87,4 +87,5 @@ etapa antes de optimizar:
 | render | 8–16 ms |
 
 Los rangos son objetivos, no resultados medidos. El protocolo de cámara debe
-registrar `p50`, `p95` y pérdida de frames.
+registrar `p50`, `p95` y pérdida de frames. La calidad del frame
+modula el filtro visual; no altera la secuencia raw de captura.

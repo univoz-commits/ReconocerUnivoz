@@ -17,7 +17,7 @@ El visor actual ya:
 - valida valores finitos y conexiones geométricas;
 - conserva presencia como estado discreto;
 - conserva mano durante huecos breves;
-- aplica low-pass exponencial y rate limit para render;
+- aplica One Euro adaptativo, MAD y rate limit para render;
 - construye marco de mano con puntos de palma;
 - calibra neutral del pulgar;
 - calcula falanges por segmentos;
@@ -25,10 +25,12 @@ El visor actual ya:
 - aplica límites de flexión;
 - mantiene continuidad mediante cuaterniones para brazo y muñeca.
 
-El filtro visual actual no es One Euro. Esto importa para comparar métricas:
-no atribuirle propiedades adaptativas que todavía no tiene.
+El filtro recibe calidad del frame cuando está disponible. Usa una ventana MAD
+de hasta cinco muestras, umbral `z > 3.5` y sigma mínimo para no marcar cada
+movimiento pequeño como outlier. Raw, grabación y vector IA no pasan por esta
+capa visual.
 
-## Fase futura de validación robusta
+## Validación robusta implementada
 
 ### Gating
 
@@ -46,8 +48,8 @@ sigma_robust = 1.4826 × MAD
 z = |x_actual - m| / (sigma_robust + ε)
 ```
 
-Marcar outlier cuando `z > 3.5`. Reparar con mediana ponderada o predicción,
-reducir confianza y conservar la medición original para diagnóstico.
+Marcar outlier cuando `z > 3.5`. Reparar usando el último estado visual antes de
+rate limit y One Euro. Conservar la medición original para diagnóstico.
 
 ### One Euro
 

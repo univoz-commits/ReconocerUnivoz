@@ -16,6 +16,8 @@ La base funcional ya contiene:
 - Validación de geometría, resolución de lado anatómico y asociación uno-a-uno.
 - Marco de mano, calibración del pulgar, dedos por falange, IK de dos huesos,
   límites de codo y recuperación tras pérdida de mano.
+- Suavizado visual con One Euro, rechazo MAD y rate limit; datos raw de captura
+  permanecen separados.
 - DTW offline; AI Engine opcional con SVM/kNN/centroide.
 
 La suite automatizada está verde al documentar esta rama. La validación con

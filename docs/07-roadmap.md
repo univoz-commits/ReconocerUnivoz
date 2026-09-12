@@ -25,8 +25,9 @@ evidencia independiente y conservar `MotionFrameV2` 152D.
 - One Euro por posición/ángulo;
 - límites de salto y métricas.
 
-La rama ya tiene validación geométrica y low-pass visual; falta medir si MAD y
-One Euro aportan mejora frente al baseline.
+La rama ya tiene validación geométrica, MAD, One Euro y rate limit visual.
+Falta medir con grabaciones reales cuánto reducen jitter y qué latencia agregan
+frente al baseline.
 
 ## Fase 2 — palma y pulgar
 
