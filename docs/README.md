@@ -48,6 +48,7 @@ cámara física todavía requiere una sesión asistida.
 - [Syllabus técnico](08-syllabus-tecnico.md)
 - [Protocolo de cámara asistido](09-pruebas-camara.md)
 - [Métricas y criterios de aceptación](10-metricas-y-criterios.md)
+- [Evidencia de sesión web](evidence/2026-09-11-web-camera-session.md)
 - [Plan ejecutable](superpowers/plans/2026-09-11-rigbody-roadmap.md)
 
 ## Verificación rápida
