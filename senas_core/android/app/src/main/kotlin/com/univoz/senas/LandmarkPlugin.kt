@@ -38,9 +38,9 @@ class LandmarkPlugin(
     companion object {
         const val CANAL_METODOS = "univoz/camara"
 
-        // Fusionado: solo dispara cuando pose y manos coinciden en el mismo
-        // timestamp exacto. Usalo para guardar muestras o para el
-        // clasificador (DtwClassifier) cuando lo conectes.
+        // Fusionado: solo dispara cuando pose y manos estan dentro de una
+        // ventana compatible de 120 ms. Usalo para guardar muestras o para
+        // el clasificador (DtwClassifier).
         const val CANAL_EVENTOS = "univoz/landmarks"
 
         // Preview: dispara apenas termina CUALQUIERA de los dos modelos.
@@ -49,14 +49,12 @@ class LandmarkPlugin(
 
         // Resolucion que le pedimos a CameraX para el analisis (NO para el
         // preview, que se queda a full resolucion para verse bien).
-        private val RESOLUCION_ANALISIS = Size(480, 640)
+        private val RESOLUCION_ANALISIS = Size(360, 480)
 
-        // Cada cuanto (como minimo) volvemos a mandar POSE, aunque el
-        // modelo ya este libre. El torso/hombros no cambian tan rapido
-        // como la forma de una mano al senar, asi que no hace falta
-        // pedirle pose tan seguido como manos -- eso libera computo real
-        // para el modelo de manos, que es el que necesita responder rapido.
-        private const val INTERVALO_MIN_POSE_NS = 150_000_000L // ~6-7 veces por segundo
+        // Manos intentan cada captura; Pose corre cada ~66 ms. El reparto
+        // conserva cadena anatomica fresca y deja CPU para dedos a 30 FPS.
+        // Render/preview continua independiente a 60 FPS.
+        private const val INTERVALO_MIN_POSE_NS = 66_000_000L
     }
     private val principal = Handler(Looper.getMainLooper())
     private val ejecutor = Executors.newSingleThreadExecutor()
@@ -162,7 +160,9 @@ class LandmarkPlugin(
                 result.success(
                     mapOf(
                         "textureId" to texEntry.id(),
-                        "espejo" to frontal,
+                        // Preview sin espejo: el eje horizontal debe coincidir
+                        // con landmarks y asociación anatómica.
+                        "espejo" to false,
                         "ancho" to ancho,
                         "alto" to alto,
                     )
@@ -221,7 +221,7 @@ class LandmarkPlugin(
     }
 
     private fun aMapa(f: LandmarkEngine.FrameResult): HashMap<String, Any?> {
-        val payload = HashMap<String, Any?>(5)
+        val payload = HashMap<String, Any?>(13)
         payload["t"] = f.timestampMs
         payload["pose"] = f.pose
         // Esqueleto metrico en 3D: es el unico con el que se puede
@@ -229,6 +229,13 @@ class LandmarkPlugin(
         payload["poseMundo"] = f.poseMundo
         payload["left"] = f.left
         payload["right"] = f.right
+        payload["renderLeft"] = f.renderLeft
+        payload["renderRight"] = f.renderRight
+        payload["pose_t"] = f.poseTimestampMs
+        payload["hands_t"] = f.handsTimestampMs
+        payload["source_skew_ms"] = f.sourceSkewMs
+        payload["association"] = f.association
+        payload["errors"] = f.errors
         return payload
     }
     private fun detener() {

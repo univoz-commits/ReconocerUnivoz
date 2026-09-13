@@ -86,7 +86,11 @@ class _BaseCuerpo {
   /// hombros.
   List<double> proyectar(List<double> p) {
     final q = [p[0] - origen[0], p[1] - origen[1], p[2] - origen[2]];
-    return [_pto(q, der) / escala, _pto(q, arr) / escala, _pto(q, fre) / escala];
+    return [
+      _pto(q, der) / escala,
+      _pto(q, arr) / escala,
+      _pto(q, fre) / escala
+    ];
   }
 }
 
@@ -171,9 +175,14 @@ List<double>? normalizeFrame(
 
   final ls = pose[kLShoulder];
   final rs = pose[kRShoulder];
-  if (ls.length > 3 &&
-      (ls[3] < minVisibility || rs[3] < minVisibility)) {
+  if (ls.length < 4 || rs.length < 4) return null;
+  if (ls[3] < minVisibility || rs[3] < minVisibility) {
     return null;
+  }
+
+  for (final index in kPoseBodyIdx) {
+    if (poseMundo[index].length < 3 ||
+        poseMundo[index].any((value) => !value.isFinite)) return null;
   }
 
   final base = _baseDe(poseMundo);

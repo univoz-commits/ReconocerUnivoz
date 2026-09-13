@@ -1,4 +1,4 @@
-﻿/// Ciclo de vida de la camara + grabacion de una sena.
+/// Ciclo de vida de la camara + grabacion de una sena.
 ///
 /// Lo comparten la pantalla de reconocimiento y la de captura de muestras:
 /// las dos necesitan exactamente lo mismo (preview en vivo, esqueleto, y un
@@ -8,11 +8,51 @@
 library controlador_captura;
 
 import 'dart:async';
+import 'dart:convert';
 
+import 'package:crypto/crypto.dart' show sha256;
 import 'package:flutter/foundation.dart';
 
 import 'camera_bridge.dart';
-import 'sign_norm.dart' show kTFrames, resample;
+import 'motion_contract.dart';
+import 'sign_norm.dart' show fillGaps, kTFrames, resample;
+
+/// Resultado completo de una captura. La secuencia normalizada alimenta DTW
+/// y el modelo; los landmarks crudos permiten auditar o re-normalizar sin
+/// guardar video.
+class CapturaMovimiento {
+  final MotionSequenceV2 secuencia;
+  final List<LandmarkFrame> framesCrudos;
+  final int framesInvalidos;
+  final double? fps;
+  final int? duracionMs;
+  final double? visibilidadMin;
+  final double qualityScore;
+  final String checksumSha256;
+
+  CapturaMovimiento({
+    required this.secuencia,
+    required List<LandmarkFrame> framesCrudos,
+    required this.framesInvalidos,
+    required this.fps,
+    required this.duracionMs,
+    required this.visibilidadMin,
+    required this.qualityScore,
+    required this.checksumSha256,
+  }) : framesCrudos = List<LandmarkFrame>.unmodifiable(framesCrudos);
+
+  Map<String, dynamic> toJson() => {
+        'schema': 'MotionCaptureV1',
+        'sequence': secuencia.toJson(),
+        'frames': framesCrudos.map((frame) => frame.toJson()).toList(),
+        'frames_invalidos': framesInvalidos,
+        if (fps != null) 'fps': fps,
+        if (duracionMs != null) 'duracion_ms': duracionMs,
+        if (visibilidadMin != null) 'visibilidad_min': visibilidadMin,
+        'quality_score': qualityScore,
+        'checksum_sha256': checksumSha256,
+      };
+}
 
 class ControladorCaptura extends ChangeNotifier {
   final CameraBridge camara = CameraBridge();
@@ -20,7 +60,8 @@ class ControladorCaptura extends ChangeNotifier {
   /// Ultimo frame para pintar el esqueleto. Va aparte del ChangeNotifier
   /// para que el preview se repinte a 30 fps sin reconstruir la pantalla
   /// entera en cada frame.
-  final ValueNotifier<LandmarkFrame?> frame = ValueNotifier<LandmarkFrame?>(null);
+  final ValueNotifier<LandmarkFrame?> frame =
+      ValueNotifier<LandmarkFrame?>(null);
 
   CamaraIniciada? iniciada;
   String? error;
@@ -30,13 +71,20 @@ class ControladorCaptura extends ChangeNotifier {
   StreamSubscription? _subPreview;
   StreamSubscription? _subGrabacion;
   final List<List<double>> _buffer = [];
+  final List<List<double>?> _bufferConHuecos = [];
+  final List<LandmarkFrame> _framesCrudos = [];
+  int _framesInvalidos = 0;
 
   /// Cuantos frames utilizables lleva la grabacion en curso.
   int get framesGrabados => _buffer.length;
+  int get framesRecibidos => _framesCrudos.length;
+  int get framesInvalidos => _framesInvalidos;
   bool get lista => iniciada != null;
 
   Future<void> iniciar({bool frontal = true, bool cruzarManos = false}) async {
-    camara.cruzarManos = cruzarManos;
+    // Parámetro legado para no romper llamadas existentes. El motor resuelve
+    // lado anatómico por cadena hombro-codo-muñeca y nunca cruza frames.
+    camara.cruzarManos = false;
     iniciada = null;
     error = null;
     _notificar();
@@ -61,25 +109,90 @@ class ControladorCaptura extends ChangeNotifier {
 
   void empezar() {
     _buffer.clear();
+    _bufferConHuecos.clear();
+    _framesCrudos.clear();
+    _framesInvalidos = 0;
     grabando = true;
     _notificar();
-    _subGrabacion = camara.vectores.listen((e) {
+    _subGrabacion = camara.frames.listen((f) {
       if (_apagado) return;
-      _buffer.add(e.vec);
-      if (_buffer.length % 5 == 0) _notificar();
+      _framesCrudos.add(f);
+      final vec = f.normalize();
+      _bufferConHuecos.add(vec);
+      if (vec == null) {
+        _framesInvalidos++;
+      } else {
+        _buffer.add(vec);
+      }
+      if (_framesCrudos.length % 5 == 0) _notificar();
     });
   }
 
-  Future<List<List<double>>?> terminar() async {
+  /// Finaliza y devuelve secuencia, landmarks crudos y métricas.
+  Future<CapturaMovimiento?> terminarCaptura() async {
     await _subGrabacion?.cancel();
     _subGrabacion = null;
     grabando = false;
     _notificar();
     if (_buffer.isEmpty) return null;
-    return resample(List.of(_buffer), kTFrames);
+
+    final rellenada = fillGaps(List.of(_bufferConHuecos));
+    final remuestreada =
+        rellenada == null ? null : resample(rellenada, kTFrames);
+    if (remuestreada == null) return null;
+
+    final timestamps = _framesCrudos.map((frame) => frame.timestampMs).toList();
+    final primero = timestamps.isEmpty ? null : timestamps.first;
+    final ultimo = timestamps.isEmpty ? null : timestamps.last;
+    final duracion = primero != null && ultimo != null && ultimo >= primero
+        ? ultimo - primero
+        : null;
+    final fps = duracion != null && duracion > 0 && timestamps.length > 1
+        ? (timestamps.length - 1) * 1000 / duracion
+        : null;
+    final visibilidades = _framesCrudos
+        .map((frame) => frame.visibilidadMin)
+        .whereType<double>()
+        .toList();
+    final visibilidadMin = visibilidades.isEmpty
+        ? null
+        : visibilidades.reduce((a, b) => a < b ? a : b);
+    final qualityScore =
+        _framesCrudos.isEmpty ? 0.0 : _buffer.length / _framesCrudos.length;
+    final secuencia = MotionSequenceV2.fromFrames(
+      remuestreada,
+      fps: fps?.round().clamp(1, 120) ?? 30,
+      timestampsMs: List.generate(kTFrames, (i) {
+        if (duracion == null) return i * 33;
+        return primero! + (duracion * i / (kTFrames - 1)).round();
+      }),
+    );
+    final rawJson =
+        jsonEncode(_framesCrudos.map((frame) => frame.toJson()).toList());
+    final checksum = sha256.convert(utf8.encode(rawJson)).toString();
+    return CapturaMovimiento(
+      secuencia: secuencia,
+      framesCrudos: _framesCrudos,
+      framesInvalidos: _framesInvalidos,
+      fps: fps,
+      duracionMs: duracion,
+      visibilidadMin: visibilidadMin,
+      qualityScore: qualityScore,
+      checksumSha256: checksum,
+    );
   }
 
-  Future<void> reiniciar({required bool frontal, required bool cruzarManos}) async {
+  /// Compatibilidad para reconocimiento: devuelve solo secuencia.
+  Future<List<List<double>>?> terminar() async {
+    return (await terminarCaptura())
+        ?.secuencia
+        .frames
+        .map((frame) => List<double>.from(frame))
+        .toList();
+  }
+
+  Future<void> reiniciar(
+      {required bool frontal, required bool cruzarManos}) async {
     await _subGrabacion?.cancel();
     _subGrabacion = null;
     grabando = false;

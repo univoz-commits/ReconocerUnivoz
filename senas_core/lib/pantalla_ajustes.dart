@@ -8,7 +8,9 @@ library pantalla_ajustes;
 
 import 'package:flutter/material.dart';
 
+import 'motion_contract.dart';
 import 'muestras_locales.dart';
+import 'pantalla_espejo.dart';
 import 'voz.dart';
 
 class PantallaAjustes extends StatefulWidget {
@@ -42,8 +44,20 @@ class _PantallaAjustesState extends State<PantallaAjustes> {
     await _almacen.guardarAjustes(_a);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Ajustes guardados. Volvé a entrar a Reconocer para aplicarlos.')),
+      const SnackBar(
+          content: Text(
+              'Ajustes guardados. Volvé a entrar a Reconocer para aplicarlos.')),
     );
+  }
+
+  Future<void> _calibrarPulgares() async {
+    await _almacen.guardarAjustes(_a);
+    if (!mounted) return;
+    await Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => const PantallaEspejo(iniciarCalibracion: true),
+    ));
+    if (!mounted) return;
+    setState(() => _a = _almacen.ajustes.copiar());
   }
 
   @override
@@ -78,7 +92,8 @@ class _PantallaAjustesState extends State<PantallaAjustes> {
             min: 0.0,
             max: 0.50,
             divisiones: 25,
-            ayuda: 'cuánto tiene que ganarle a la segunda candidata; más alto = más estricto',
+            ayuda:
+                'cuánto tiene que ganarle a la segunda candidata; más alto = más estricto',
             onChanged: (v) => setState(() => _a.minMargin = v),
           ),
           TextButton(
@@ -89,7 +104,126 @@ class _PantallaAjustesState extends State<PantallaAjustes> {
             child: const Text('Volver a los valores por defecto (0.55 / 0.12)'),
           ),
           const Divider(height: 32),
-
+          _titulo('RigBody / avatar 3D'),
+          _explicacion(
+            'Ajusta cómo el espacio 3D normalizado mueve el avatar. Estos '
+            'valores no cambian vectores ni entrenamiento; solo calibran el rig.',
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Invertir profundidad Z'),
+            subtitle: const Text('Úsalo si el avatar mueve manos hacia atrás.'),
+            value: _a.rigCalibration.invertZ,
+            onChanged: (v) => setState(() =>
+                _a.rigCalibration = _a.rigCalibration.copyWith(invertZ: v)),
+          ),
+          _slider(
+            etiqueta: 'Escala del avatar',
+            valor: _a.rigCalibration.avatarScale,
+            min: 0.70,
+            max: 1.30,
+            divisiones: 60,
+            ayuda: 'ajusta tamaño visual, no datos IA',
+            onChanged: (v) => setState(() =>
+                _a.rigCalibration = _a.rigCalibration.copyWith(avatarScale: v)),
+          ),
+          _slider(
+            etiqueta: 'Ganancia brazo izquierdo',
+            valor: _a.rigCalibration.leftArmGain,
+            min: 0.50,
+            max: 1.50,
+            divisiones: 50,
+            ayuda: 'respuesta del IK izquierdo',
+            onChanged: (v) => setState(() =>
+                _a.rigCalibration = _a.rigCalibration.copyWith(leftArmGain: v)),
+          ),
+          _slider(
+            etiqueta: 'Ganancia brazo derecho',
+            valor: _a.rigCalibration.rightArmGain,
+            min: 0.50,
+            max: 1.50,
+            divisiones: 50,
+            ayuda: 'respuesta del IK derecho',
+            onChanged: (v) => setState(() => _a.rigCalibration =
+                _a.rigCalibration.copyWith(rightArmGain: v)),
+          ),
+          _slider(
+            etiqueta: 'Sensibilidad de dedos',
+            valor: _a.rigCalibration.fingerSensitivity,
+            min: 0.50,
+            max: 1.50,
+            divisiones: 50,
+            ayuda: 'amplitud de flexión de falanges',
+            onChanged: (v) => setState(() => _a.rigCalibration =
+                _a.rigCalibration.copyWith(fingerSensitivity: v)),
+          ),
+          _slider(
+            etiqueta: 'Límite mínimo de codo',
+            valor: _a.rigCalibration.ikMin,
+            min: 0.0,
+            max: 1.50,
+            divisiones: 30,
+            ayuda: 'evita soluciones IK demasiado cerradas',
+            onChanged: (v) => setState(() {
+              final max =
+                  _a.rigCalibration.ikMax < v ? v : _a.rigCalibration.ikMax;
+              _a.rigCalibration =
+                  _a.rigCalibration.copyWith(ikMin: v, ikMax: max);
+            }),
+          ),
+          _slider(
+            etiqueta: 'Límite máximo de codo',
+            valor: _a.rigCalibration.ikMax,
+            min: _a.rigCalibration.ikMin,
+            max: 3.14,
+            divisiones: 62,
+            ayuda: 'evita soluciones IK imposibles',
+            onChanged: (v) => setState(
+                () => _a.rigCalibration = _a.rigCalibration.copyWith(ikMax: v)),
+          ),
+          _slider(
+            etiqueta: 'Compensación de muñeca',
+            valor: _a.rigCalibration.wristCompensation,
+            min: -1.0,
+            max: 1.0,
+            divisiones: 40,
+            ayuda: 'corrección angular de palma',
+            onChanged: (v) => setState(() => _a.rigCalibration =
+                _a.rigCalibration.copyWith(wristCompensation: v)),
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Restablecer mano si se pierde'),
+            subtitle: const Text(
+                'Tras un margen breve, devuelve dedos y muñeca a reposo; '
+                'evita dejar una mano congelada o deformada.'),
+            value: _a.rigCalibration.resetHandOnLoss,
+            onChanged: (v) => setState(() => _a.rigCalibration =
+                _a.rigCalibration.copyWith(resetHandOnLoss: v)),
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Modo diagnóstico RigBody'),
+            subtitle: const Text(
+                'Muestra FPS, skew, tracks, contacto y errores. Apagado por defecto; '
+                'guarda hasta 300 frames sin video.'),
+            value: _a.rigDiagnosticMode,
+            onChanged: (v) => setState(() => _a.rigDiagnosticMode = v),
+          ),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: OutlinedButton.icon(
+              icon: const Icon(Icons.pan_tool_alt_outlined, size: 18),
+              label: const Text('Calibrar pulgares con cámara'),
+              onPressed: _calibrarPulgares,
+            ),
+          ),
+          TextButton(
+            onPressed: () =>
+                setState(() => _a.rigCalibration = const RigCalibration()),
+            child: const Text('Restablecer calibración RigBody'),
+          ),
+          const Divider(height: 32),
           _titulo('Cámara'),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
@@ -99,17 +233,7 @@ class _PantallaAjustesState extends State<PantallaAjustes> {
             value: _a.camaraFrontal,
             onChanged: (v) => setState(() => _a.camaraFrontal = v),
           ),
-          SwitchListTile(
-            contentPadding: EdgeInsets.zero,
-            title: const Text('Cruzar mano izquierda / derecha'),
-            subtitle: const Text(
-                'Activalo si las señas de una sola mano salen sistemáticamente confundidas. '
-                'Es el equivalente en vivo del --espejo de la ingesta por video.'),
-            value: _a.cruzarManos,
-            onChanged: (v) => setState(() => _a.cruzarManos = v),
-          ),
           const Divider(height: 32),
-
           _titulo('Voz'),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
@@ -137,7 +261,6 @@ class _PantallaAjustesState extends State<PantallaAjustes> {
             ),
           ),
           const Divider(height: 32),
-
           _titulo('Diccionario'),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,

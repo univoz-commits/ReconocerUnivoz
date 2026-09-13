@@ -3,6 +3,13 @@ import vm from 'node:vm';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
+import {
+  createThumbCalibration,
+  measureThumbPose,
+  solveThumbPose,
+} from '../../assets/avatar_viewer/rig_math.mjs';
+import { createRigSafetyGate } from '../../assets/avatar_viewer/rig_safety.mjs';
+import { assignHandsByArmChain } from '../../assets/avatar_viewer/rig_tracking.mjs';
 
 // Execute production functions with real Three.js math, without camera/DOM.
 const html = readFileSync(new URL('../../assets/avatar_viewer/index.html', import.meta.url), 'utf8');
@@ -30,10 +37,6 @@ const productionFingerSigns = {
   left: Number(calBlock.match(/left:\s*\{[^\n]*dedos:\s*(-?\d+)/)[1]),
   right: Number(calBlock.match(/right:\s*\{[^\n]*dedos:\s*(-?\d+)/)[1]),
 };
-const productionThumbSigns = {
-  left: Number(calBlock.match(/left:\s*\{[^\n]*thumbDedos:\s*(-?\d+)/)[1]),
-  right: Number(calBlock.match(/right:\s*\{[^\n]*thumbDedos:\s*(-?\d+)/)[1]),
-};
 const coord = (x,y,z=0) => ({ x,y,z,visibility:1 });
 function pose() {
   const p = Array.from({length:33}, () => coord(0,0));
@@ -42,10 +45,10 @@ function pose() {
   return p;
 }
 function hand(x,y) { return Array.from({length:21}, () => coord(x,y)); }
-const sidesRuntime = () => runtime(['webCoord','webFinito','poseMunecaConfiableWeb','ladoPorMunecaPoseWeb','ladoFisicoManoWeb','manosDesdeResultado'], {
-  kManoTrackGapMs: 500,
-  ultimaAsignacionWeb: {left:null, right:null, timestampMs:0},
-});
+const sidesRuntime = () => runtime([
+  'webCoord', 'webFinito', 'poseMunecaConfiableWeb',
+  'ladoPorMunecaPoseWeb', 'ladoFisicoManoWeb',
+]);
 
 test('hand at left pose wrist stays left despite contradictory category', () => {
   const c=sidesRuntime(), h=hand(.75,.2);
@@ -64,32 +67,32 @@ test('low-confidence pose wrists do not override hand fallback', () => {
 test('two hands use one-to-one pose matching when one crosses center', () => {
   const p=pose(); p[15]=coord(.35,.2); p[16]=coord(.65,.3);
   const hCenter=hand(.50,.25), hRight=hand(.65,.3);
-  const c=sidesRuntime();
-  const result=c.manosDesdeResultado({
-    landmarks:[hRight,hCenter], handednesses:[[],[]],
-  },p);
-  assert.equal(result.left,hCenter);
-  assert.equal(result.right,hRight);
+  const result=assignHandsByArmChain([
+    {landmarks:hRight, side:''}, {landmarks:hCenter, side:''},
+  ], {
+    leftShoulder: coord(.70,.4), leftElbow: coord(.45,.3), leftWrist: p[15],
+    rightShoulder: coord(.30,.4), rightElbow: coord(.55,.3), rightWrist: p[16],
+    shoulderWidth: .4,
+  });
+  assert.deepEqual(result.sideByIndex, ['right', 'left']);
 });
-test('ambiguous hand assignment keeps temporal identity instead of swapping', () => {
-  const p = pose();
-  p[15] = coord(.5,.25); p[16] = coord(.5,.25);
-  const c = sidesRuntime();
-  c.manosDesdeResultado({landmarks:[hand(.52,.25),hand(.48,.25)]},p,100);
-  const result = c.manosDesdeResultado(
-    {landmarks:[hand(.49,.25),hand(.51,.25)]},p,133);
-  assert.equal(result.left[0].x,.51);
-  assert.equal(result.right[0].x,.49);
+test('ambiguous arm-chain assignment never guesses a side', () => {
+  const result = assignHandsByArmChain([
+    {landmarks:hand(.49,.25), side:''},
+    {landmarks:hand(.51,.25), side:''},
+  ], {
+    leftShoulder: coord(.40,.35), leftElbow: coord(.46,.45), leftWrist: coord(.50,.25),
+    rightShoulder: coord(.60,.35), rightElbow: coord(.54,.45), rightWrist: coord(.50,.25),
+    shoulderWidth: .2,
+  });
+  assert.deepEqual(result.sideByIndex, [null, null]);
+  assert.equal(result.mode, 'ambiguous');
 });
 test('two low-confidence pose wrists keep handedness fallback', () => {
   const p=pose(); p[15].visibility=.1; p[16].visibility=.1;
   const c=sidesRuntime();
-  const result=c.manosDesdeResultado({
-    landmarks:[hand(.75,.2),hand(.25,.3)],
-    handednesses:[[{categoryName:'Left'}],[{categoryName:'Right'}]],
-  },p);
-  assert.equal(result.left[0].x,.25);
-  assert.equal(result.right[0].x,.75);
+  assert.equal(c.ladoFisicoManoWeb(hand(.75,.2),'Left',p),'right');
+  assert.equal(c.ladoFisicoManoWeb(hand(.25,.3),'Right',p),'left');
 });
 test('unknown hand without reliable wrists is not assigned an invented side', () => {
   assert.equal(sidesRuntime().ladoFisicoManoWeb(hand(.75,.2),'',null),null);
@@ -135,10 +138,37 @@ function thumbRuntime(side) {
     kFasesPulgar: ['Metacarpal', 'Proximal', 'Distal'],
     cal: {
       fingerSensitivity: 1,
-      left: { dedos: productionFingerSigns.left, thumbDedos: productionThumbSigns.left },
-      right: { dedos: productionFingerSigns.right, thumbDedos: productionThumbSigns.right },
+      thumbCalibration: {
+        left: createThumbCalibration(
+          measureThumbPose(openThumbShape('left')),
+          measureThumbPose(bentThumbShape('left')),
+          1,
+        ),
+        right: createThumbCalibration(
+          measureThumbPose(openThumbShape('right')),
+          measureThumbPose(bentThumbShape('right')),
+          1,
+        ),
+      },
+      left: { dedos: productionFingerSigns.left },
+      right: { dedos: productionFingerSigns.right },
     },
+    thumbRigMap: {
+      left: {
+        Metacarpal: {axis:'x', sign:1},
+        Proximal: {axis:'y', sign:-1},
+        Distal: {axis:'z', sign:1},
+      },
+      right: {
+        Metacarpal: {axis:'x', sign:-1},
+        Proximal: {axis:'y', sign:1},
+        Distal: {axis:'z', sign:-1},
+      },
+    },
+    rigThumbState: {left:null, right:null},
     thumbNeutralRig: {left:null, right:null},
+    measureThumbPose,
+    solveThumbPose,
   });
   vm.runInContext([
     ...['_largo','_norm','_pto','_resta','_angulo','moverMano'].map(source),
@@ -154,6 +184,7 @@ function bentThumbShape(side) {
   points[1] = [s * .18, -.05, 0];
   points[2] = [s * .24, -.11, 0];
   points[3] = [s * .28, -.14, 0];
+  points[8] = [0, -.20, 0];
   return points;
 }
 
@@ -164,35 +195,23 @@ function openThumbShape(side) {
   points[1] = [s * .18, .02, 0];
   points[2] = [s * .26, .03, 0];
   points[3] = [s * .34, .04, 0];
+  points[8] = [0, -.20, 0];
   return points;
 }
 
 for (const side of ['left', 'right']) {
-  test(`${side} thumb keeps visible CMC motion and bends down`, () => {
+  test(`${side} thumb applies independent calibrated bone axes`, () => {
     const {ctx, hand, metacarpal, proximal, distal} = thumbRuntime(side);
     ctx.moverMano(side, true, openThumbShape(side));
-    hand.updateMatrixWorld(true);
-    const openTipY = distal.getWorldPosition(new THREE.Vector3()).y;
-    assert.ok(Math.abs(metacarpal.rotation.z) < .005,
-      `${side} neutral thumb already flexed`);
     const points = bentThumbShape(side);
     ctx.moverMano(side, true, points);
     hand.updateMatrixWorld(true);
-    const bentTipY = distal.getWorldPosition(new THREE.Vector3()).y;
-    const sign = productionThumbSigns[side];
-    assert.ok(Math.abs(metacarpal.rotation.z) > .005,
-      `${side} thumb CMC stayed rigid`);
-    assert.ok(Math.abs(proximal.rotation.z) > .005,
-      `${side} thumb MCP stayed rigid`);
-    assert.ok(Math.abs(distal.rotation.z) > .005,
-      `${side} thumb IP stayed rigid`);
-    assert.ok(bentTipY < openTipY - .005,
-      `${side} thumb bends upward: open=${openTipY} bent=${bentTipY}`);
-    ctx.moverMano(side, true, openThumbShape(side));
-    assert.ok(Math.abs(metacarpal.rotation.z) < .005 &&
-      Math.abs(proximal.rotation.z) < .005 &&
-      Math.abs(distal.rotation.z) < .005,
-      `${side} thumb did not return from flexion`);
+    const s = side === 'left' ? 1 : -1;
+    assert.ok(metacarpal.rotation.x * s > .1, `${side} CMC axis/sign ignored`);
+    assert.ok(proximal.rotation.y * -s > .1, `${side} MCP axis/sign ignored`);
+    assert.ok(distal.rotation.z * s > .1, `${side} IP axis/sign ignored`);
+    assert.equal(metacarpal.rotation.z, 0);
+    assert.equal(proximal.rotation.z, 0);
   });
 }
 
@@ -205,6 +224,7 @@ function handLossRuntime(resetHandOnLoss = true) {
       left: {desde: 0, enReposo: false},
       right: {desde: 0, enReposo: false},
     },
+    rigThumbState: {left: {}, right: {}},
     thumbNeutralRig: {left: {}, right: {}},
     ponerManoReposo: lado => calls.push(`mano:${lado}`),
     ponerMunecaReposo: lado => calls.push(`muneca:${lado}`),
@@ -223,7 +243,7 @@ test('hand loss waits grace, returns to rest and recalibrates on reappearance', 
   assert.equal(ctx.estadoPerdidaMano.left.enReposo, true);
   assert.equal(ctx.actualizarEstadoPerdidaMano('left', true, 383), true);
   assert.equal(ctx.estadoPerdidaMano.left.enReposo, false);
-  assert.equal(ctx.thumbNeutralRig.left, null);
+  assert.equal(ctx.rigThumbState.left, null);
 });
 
 test('hand loss option disabled preserves last valid hand pose', () => {
@@ -232,65 +252,6 @@ test('hand loss option disabled preserves last valid hand pose', () => {
   ctx.actualizarEstadoPerdidaMano('right', false, 1000);
   assert.deepEqual(calls, []);
   assert.equal(ctx.estadoPerdidaMano.right.enReposo, false);
-});
-
-function smoothingRuntime() {
-  const ctx = vm.createContext({
-    Math, Number, Array,
-    webCameraState: {smoothing: true},
-    filtroFrameWeb: null,
-    filtroTimestampWeb: 0,
-  });
-  vm.runInContext([
-    'const kOffLocL=24,kOffLocR=27,kOffPresL=30,kOffPresR=31,kOffShapeL=32,kOffShapeR=92,kFrameDim=152;',
-    'const kOneEuroMinCutoffRig=1.0,kOneEuroBetaRig=0.01,kOneEuroDCutoffRig=1.0;',
-    'const kMadWindowRig=5,kMadThresholdRig=3.5;',
-    'const kRigDeadband=0.004,kRigMaxRateBody=5.0,kRigMaxRateHand=8.0;',
-    'let filtrosOneEuroWeb=[],historialMadWeb=[];',
-    ...[
-      'crearFiltroOneEuro', 'estadisticaMAD', 'reiniciarFiltroWeb',
-      'rigEsBloqueMano', 'limitarPasoRig', 'suavizarFrameWeb',
-    ].map(source),
-  ].join('\n'), ctx);
-  return ctx;
-}
-
-test('visual smoothing limits a single-frame coordinate spike', () => {
-  const c = smoothingRuntime();
-  const stable = Array(152).fill(0); stable[30] = 1; stable[31] = 1;
-  c.suavizarFrameWeb(stable, 0);
-  const spike = stable.slice(); spike[24] = 5;
-  const out = c.suavizarFrameWeb(spike, 33);
-  assert.ok(out[24] < 1, `spike reached avatar: ${out[24]}`);
-});
-
-test('visual smoothing eases hand reappearance after a tracking gap', () => {
-  const c = smoothingRuntime();
-  const first = Array(152).fill(0); first[30] = 1; first[31] = 1;
-  c.suavizarFrameWeb(first, 0);
-  const gap = first.slice(); gap[30] = 0; gap[31] = 0;
-  c.suavizarFrameWeb(gap, 33);
-  const reappeared = first.slice(); reappeared[30] = 1; reappeared[31] = 1; reappeared[24] = 2;
-  const out = c.suavizarFrameWeb(reappeared, 66);
-  assert.ok(out[24] < 1, `reappearing hand teleported: ${out[24]}`);
-});
-
-test('low confidence lowers One Euro cutoff', () => {
-  const c = runtime(['crearFiltroOneEuro']);
-  const low = c.crearFiltroOneEuro(1.0, 0.01, 1.0);
-  const high = c.crearFiltroOneEuro(1.0, 0.01, 1.0);
-  low.filter(0, 0, 0.2);
-  high.filter(0, 0, 1.0);
-  const lowValue = low.filter(1, 33, 0.2);
-  const highValue = high.filter(1, 33, 1.0);
-  assert.ok(lowValue < highValue);
-});
-
-test('MAD flags isolated landmark spike', () => {
-  const c = runtime(['estadisticaMAD']);
-  const result = c.estadisticaMAD([1, 1, 1, 1, 1, 10], 10);
-  assert.equal(result.outlier, true);
-  assert.equal(result.median, 1);
 });
 
 test('overlay rejects non-finite and out-of-frame landmarks', () => {
@@ -331,6 +292,26 @@ test('hand geometry rejects broken connections before normalization', () => {
   assert.equal(c.webManoUtilizable(outside), false);
   const jump = validHand(); jump[12] = coord(.5,.02);
   assert.equal(c.webManoUtilizable(jump), false);
+});
+
+test('production rotation writer never applies invalid transform', () => {
+  const gate = createRigSafetyGate();
+  const h = new THREE.Object3D();
+  const c = runtime(['metaRigFrame', 'aplicarRotacionSegura'], {
+    safetyGateFor: () => gate,
+    reportSafetyAnomaly: () => {},
+    performance: {now: () => 1000},
+  });
+  c.aplicarRotacionSegura(h, 'left:Index:Proximal', [0.2, 0, 0], {
+    frameId: 1, timestampMs: 1000,
+  });
+  const before = h.rotation.x;
+  const result = c.aplicarRotacionSegura(h, 'left:Index:Proximal', [NaN, 0, 0], {
+    frameId: 2, timestampMs: 1033,
+  });
+  assert.equal(result.accepted, false);
+  assert.equal(result.code, 'non_finite_transform');
+  assert.equal(h.rotation.x, before);
 });
 
 function validPoseWorld() {

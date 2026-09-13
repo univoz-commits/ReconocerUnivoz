@@ -131,10 +131,10 @@ class _PantallaCapturaState extends State<PantallaCaptura> {
   Future<void> _alternarGrabacion() async {
     if (_ctrl.grabando) {
       final framesLeidos = _ctrl.framesGrabados;
-      final seq = await _ctrl.terminar();
+      final captura = await _ctrl.terminarCaptura();
       if (!mounted) return;
 
-      if (seq == null) {
+      if (captura == null) {
         _mostrar(
           'No se capturó nada. Asegurate de que se vean los hombros y las manos en cámara.',
           error: true,
@@ -152,14 +152,19 @@ class _PantallaCapturaState extends State<PantallaCaptura> {
       await _almacen.agregar(
         gloss: _glosa,
         espanol: _palabraCtrl.text.trim(),
-        seq: seq,
-        nFramesOrig: framesLeidos,
-        categoria: (_categoriaCtrl?.text.trim().isEmpty ?? true) ? null : _categoriaCtrl!.text.trim(),
-        signer: _signerCtrl.text.trim().isEmpty ? null : _signerCtrl.text.trim(),
+        seq: captura.secuencia.frames,
+        nFramesOrig: captura.framesCrudos.length,
+        categoria: (_categoriaCtrl?.text.trim().isEmpty ?? true)
+            ? null
+            : _categoriaCtrl!.text.trim(),
+        signer:
+            _signerCtrl.text.trim().isEmpty ? null : _signerCtrl.text.trim(),
+        captura: captura,
       );
       if (!mounted) return;
       setState(() => _guardadasEstaSesion++);
-      _mostrar('Guardada. $_glosa tiene ${_almacen.cuantasDe(_glosa)} muestra(s).');
+      _mostrar(
+          'Guardada. $_glosa tiene ${_almacen.cuantasDe(_glosa)} muestra(s).');
     } else {
       setState(() => _aviso = null);
       _ctrl.empezar();
@@ -272,8 +277,8 @@ class _PantallaCapturaState extends State<PantallaCaptura> {
   /// ya se usaron en este telefono -- asi el mismo nombre de categoria no
   /// termina escrito de dos formas distintas por error de tipeo.
   Widget _campoCategoria() {
-    final sugerencias = {...kCategoriasBase, ..._almacen.categoriasUsadas}.toList()
-      ..sort();
+    final sugerencias =
+        {...kCategoriasBase, ..._almacen.categoriasUsadas}.toList()..sort();
     return Autocomplete<String>(
       optionsBuilder: (TextEditingValue valor) {
         if (valor.text.isEmpty) return sugerencias;
@@ -335,7 +340,8 @@ class _PantallaCapturaState extends State<PantallaCaptura> {
             children: [
               Text(_ctrl.error!, textAlign: TextAlign.center),
               const SizedBox(height: 16),
-              ElevatedButton(onPressed: _arrancar, child: const Text('Reintentar')),
+              ElevatedButton(
+                  onPressed: _arrancar, child: const Text('Reintentar')),
             ],
           ),
         ),
@@ -354,11 +360,13 @@ class _PantallaCapturaState extends State<PantallaCaptura> {
             aspectRatio: camara.relacionAspecto,
             child: Stack(
               children: [
-                Positioned.fill(child: Texture(textureId: camara.textureId)),
+                Positioned.fill(
+                  child: Texture(textureId: camara.textureId),
+                ),
                 ValueListenableBuilder<LandmarkFrame?>(
                   valueListenable: _ctrl.frame,
                   builder: (_, frame, __) => CustomPaint(
-                    painter: SkeletonPainter(frame: frame, espejo: camara.espejo),
+                    painter: SkeletonPainter(frame: frame),
                     size: Size.infinite,
                   ),
                 ),
@@ -434,7 +442,9 @@ class _PantallaCapturaState extends State<PantallaCaptura> {
                 margin: const EdgeInsets.only(bottom: 8),
                 padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
-                  color: _avisoEsError ? Colors.orange.shade800 : Colors.green.shade700,
+                  color: _avisoEsError
+                      ? Colors.orange.shade800
+                      : Colors.green.shade700,
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: Text(_aviso!,
@@ -444,8 +454,10 @@ class _PantallaCapturaState extends State<PantallaCaptura> {
               width: double.infinity,
               child: ElevatedButton.icon(
                 onPressed: _puedeGrabar ? _alternarGrabacion : null,
-                icon: Icon(_ctrl.grabando ? Icons.stop : Icons.fiber_manual_record),
-                label: Text(_ctrl.grabando ? 'Detener y guardar' : 'Grabar muestra'),
+                icon: Icon(
+                    _ctrl.grabando ? Icons.stop : Icons.fiber_manual_record),
+                label: Text(
+                    _ctrl.grabando ? 'Detener y guardar' : 'Grabar muestra'),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: _ctrl.grabando ? Colors.red : null,
                   foregroundColor: _ctrl.grabando ? Colors.white : null,
