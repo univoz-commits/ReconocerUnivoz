@@ -9,7 +9,10 @@ import {
   solveThumbPose,
 } from '../../assets/avatar_viewer/rig_math.mjs';
 import { createRigSafetyGate } from '../../assets/avatar_viewer/rig_safety.mjs';
-import { assignHandsByArmChain } from '../../assets/avatar_viewer/rig_tracking.mjs';
+import {
+  assignHandsByArmChain,
+  resolveAnatomicalHandSide,
+} from '../../assets/avatar_viewer/rig_tracking.mjs';
 
 // Execute production functions with real Three.js math, without camera/DOM.
 const html = readFileSync(new URL('../../assets/avatar_viewer/index.html', import.meta.url), 'utf8');
@@ -17,6 +20,18 @@ function source(name) {
   const start = html.indexOf(`    function ${name}(`);
   assert.ok(start >= 0, `Missing production function ${name}`);
   return html.slice(start, html.indexOf('\n    }', start) + 6);
+}
+function sourceBlock(name) {
+  const start = html.indexOf(`    function ${name}(`);
+  assert.ok(start >= 0, `Missing production function ${name}`);
+  const open = html.indexOf('{', start);
+  let depth = 0;
+  for (let index = open; index < html.length; index++) {
+    if (html[index] === '{') depth++;
+    if (html[index] === '}') depth--;
+    if (depth === 0) return html.slice(start, index + 1);
+  }
+  assert.fail(`Unclosed production function ${name}`);
 }
 function runtime(names, extra = {}) {
   const ctx = vm.createContext({
@@ -38,31 +53,21 @@ const productionFingerSigns = {
   right: Number(calBlock.match(/right:\s*\{[^\n]*dedos:\s*(-?\d+)/)[1]),
 };
 const coord = (x,y,z=0) => ({ x,y,z,visibility:1 });
+function hand(x,y) { return Array.from({length:21}, () => coord(x,y)); }
 function pose() {
   const p = Array.from({length:33}, () => coord(0,0));
   p[11]=coord(.7,.4); p[12]=coord(.3,.4);
   p[15]=coord(.75,.2); p[16]=coord(.25,.3);
   return p;
 }
-function hand(x,y) { return Array.from({length:21}, () => coord(x,y)); }
-const sidesRuntime = () => runtime([
-  'webCoord', 'webFinito', 'poseMunecaConfiableWeb',
-  'ladoPorMunecaPoseWeb', 'ladoFisicoManoWeb',
-]);
 
-test('hand at left pose wrist stays left despite contradictory category', () => {
-  const c=sidesRuntime(), h=hand(.75,.2);
-  assert.equal(c.ladoFisicoManoWeb(h,'Left',pose()), 'left');
-});
-test('crossed hands follow anatomical pose wrists, not image half', () => {
-  const p=pose(); p[15]=coord(.35,.2); p[16]=coord(.65,.3);
-  const c=sidesRuntime();
-  assert.equal(c.ladoFisicoManoWeb(hand(.35,.2),'',p),'left');
-  assert.equal(c.ladoFisicoManoWeb(hand(.65,.3),'',p),'right');
-});
-test('low-confidence pose wrists do not override hand fallback', () => {
-  const p=pose(); p[15].visibility=.1; p[16].visibility=.1;
-  assert.equal(sidesRuntime().ladoFisicoManoWeb(hand(.75,.2),'Left',p),'right');
+test('live hand side stays pending until pose arm chain is ready', () => {
+  assert.deepEqual(resolveAnatomicalHandSide({
+    mode: 'fallback', sideByIndex: ['right'],
+  }, 0), {side: null, sideLocked: false, sideAmbiguous: true});
+  assert.deepEqual(resolveAnatomicalHandSide({
+    mode: 'pose_arm_chain', sideByIndex: ['left'],
+  }, 0), {side: 'left', sideLocked: true, sideAmbiguous: false});
 });
 test('two hands use one-to-one pose matching when one crosses center', () => {
   const p=pose(); p[15]=coord(.35,.2); p[16]=coord(.65,.3);
@@ -88,15 +93,6 @@ test('ambiguous arm-chain assignment never guesses a side', () => {
   assert.deepEqual(result.sideByIndex, [null, null]);
   assert.equal(result.mode, 'ambiguous');
 });
-test('two low-confidence pose wrists keep handedness fallback', () => {
-  const p=pose(); p[15].visibility=.1; p[16].visibility=.1;
-  const c=sidesRuntime();
-  assert.equal(c.ladoFisicoManoWeb(hand(.75,.2),'Left',p),'right');
-  assert.equal(c.ladoFisicoManoWeb(hand(.25,.3),'Right',p),'left');
-});
-test('unknown hand without reliable wrists is not assigned an invented side', () => {
-  assert.equal(sidesRuntime().ladoFisicoManoWeb(hand(.75,.2),'',null),null);
-});
 test('normalized upward fingers remain upward in avatar', () => {
   // For a front-facing person cosT=-1; image dy<0 becomes shape y>0.
   const out=mathRuntime().vectorManoAAvatar([0,1,0],base);
@@ -105,6 +101,27 @@ test('normalized upward fingers remain upward in avatar', () => {
 test('hand depth toward camera points forward on avatar', () => {
   const out=mathRuntime().vectorManoAAvatar([0,0,-1],base);
   assert.ok(out.z > .999, `palm depth reversed: ${out.z}`);
+});
+
+test('marcoMano rejects invalid CMC without throwing', () => {
+  const ctx = vm.createContext({THREE, Math, Number});
+  vm.runInContext(sourceBlock('marcoMano'), ctx);
+  const x = new THREE.Vector3(0, 1, 0);
+  const y = new THREE.Vector3(1, 0, 0);
+  assert.doesNotThrow(() => ctx.marcoMano(x, y, [0, 0, 1]));
+  assert.equal(ctx.marcoMano(x, y, [0, 0, 1]), null);
+  assert.equal(ctx.marcoMano(x, y, new THREE.Vector3(0, 0, 0)), null);
+  assert.equal(ctx.marcoMano(x, y, new THREE.Vector3(NaN, 0, 1)), null);
+});
+
+test('orientarMuneca converts CMC shape array before marcoMano', () => {
+  const start = html.indexOf('    function orientarMuneca(');
+  const end = html.indexOf('    function ponerMunecaReposo(', start);
+  assert.ok(start >= 0 && end > start, 'Missing wrist orientation block');
+  const block = html.slice(start, end);
+  assert.match(block, /const cmc = vectorManoAAvatar\(puntos\[0\], base\);/);
+  assert.match(block, /const objetivo = marcoMano\(dedos, ancho, cmc\);/);
+  assert.doesNotMatch(block, /marcoMano\(dedos, ancho, puntos\[0\]\)/);
 });
 
 function thumbRuntime(side) {
@@ -252,6 +269,24 @@ test('hand loss option disabled preserves last valid hand pose', () => {
   ctx.actualizarEstadoPerdidaMano('right', false, 1000);
   assert.deepEqual(calls, []);
   assert.equal(ctx.estadoPerdidaMano.right.enReposo, false);
+});
+
+test('web pipeline wires adaptive calibration and pose stride without changing vector contract', () => {
+  assert.match(html, /createAdaptiveMotionCalibrator/);
+  assert.match(html, /createAdaptivePoseScheduler/);
+  assert.match(html, /adaptivePoseScheduler\.shouldRun/);
+  assert.match(html, /adaptiveMotionCalibrator\.update/);
+  assert.match(html, /leftSurface/);
+  assert.match(html, /kFrameDim = 152/);
+  assert.match(html, /function normalizarFrameWeb\(pose, poseMundo, left, right,\s+renderWrists/);
+});
+
+test('web keeps raw semantic hands separate from stabilized render hands', () => {
+  const block = sourceBlock('manosDesdeResultado');
+  assert.match(block, /left:\s*ultimoTrackingWeb\.left\.raw/);
+  assert.match(block, /right:\s*ultimoTrackingWeb\.right\.raw/);
+  assert.match(block, /renderLeft:\s*ultimoTrackingWeb\.left\.renderLandmarks/);
+  assert.match(block, /renderRight:\s*ultimoTrackingWeb\.right\.renderLandmarks/);
 });
 
 test('overlay rejects non-finite and out-of-frame landmarks', () => {

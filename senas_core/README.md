@@ -1,8 +1,8 @@
 # Núcleo de reconocimiento de señas
 
 Base compartida entre la app de Flutter y el pipeline de ingesta en Python.
-Esto es la fase 0: todavía no reconoce nada, pero define el formato de datos
-del que va a depender todo lo demás.
+Este núcleo contiene contrato de movimiento, RigBody cinemático, captura y
+reconocimiento offline; define el formato de datos del que depende todo.
 
 ```
 lib/sign_norm.dart          normalización, para la app
@@ -16,9 +16,54 @@ tools/gen_golden.py         genera el golden desde Python
 tools/test_norm.py          invariancia, espejo, empaquetado
 tools/test_dtw.py           clasificación, rechazo, prefiltro
 sql/001_schema.sql          esquema de PostgreSQL con pgvector
+sql/004_motion_v2.sql       contrato 2.0.0 (32 x 152) y vista estricta
+sql/005_storage_raw.sql     Storage privado opcional de landmarks comprimidos
+../backend/ai-engine/       SVM/kNN/centroide sobre MotionSequenceV2
 ```
 
 ## Cómo correrlo
+
+Desde la raíz del proyecto, `scripts/univoz.sh` orquesta backend y Flutter:
+
+```bash
+cd /home/javier-karim/ReconocerUnivoz
+./scripts/univoz.sh setup                 # primera vez
+./scripts/univoz.sh doctor                # herramientas y dispositivos
+./scripts/univoz.sh test                  # suite completa
+./scripts/univoz.sh all -d emulator-5554  # AI Engine + app
+./scripts/univoz.sh web                   # visor VRM/RigBody en navegador
+```
+
+`all` es el comando rápido: reutiliza dependencias ya instaladas, espera
+`/health`, pasa URL backend a Flutter y detiene AI Engine al pulsar `Ctrl+C`.
+`web` sirve visor standalone en
+http://127.0.0.1:8080/assets/avatar_viewer/index.html?standalone=1; carga
+univozM.vrm automáticamente. La raíz del servidor solo muestra archivos. Pulsa
+Iniciar cámara para activar MediaPipe web, ver landmarks, alimentar RigBody y
+obtener vectores 152D. Grabar 32 guarda una secuencia normalizada en memoria;
+Repetir la reproduce y JSON descarga solo vectores, nunca video. `Espejar solo
+vista` cambia únicamente preview; etiquetas I/D y huesos conservan lado físico.
+`Suavizar movimiento` filtra solo avatar; JSON y datos IA conservan frames crudos.
+Si Hand Landmarker omite etiqueta, el visor resuelve lado físico por muñeca
+respecto al centro de hombros; si queda cruzada en el centro, no inventa lado.
+En `Calibrar`, `Orientar muñeca 3D` usa el marco de palma del bind pose VRM;
+desactivarlo sirve únicamente para comparar visualmente durante calibración.
+El RigBody resuelve cada brazo con IK 3D de dos huesos hacia la muñeca
+capturada, usando longitudes reales del avatar y el plano de codo observado.
+El panel muestra `Q` como calidad estimada del frame. Una oclusión breve
+conserva última pose; predice hasta 300 ms, mezcla reposo entre 300–500 ms y
+libera el track después de 500 ms sin frame válido.
+`rig_safety.mjs` bloquea transforms inválidos por unión, congela localmente y
+recupera gradualmente. `rig_diagnostics.mjs` conserva `AuditSnapshotV1`
+numéricos en memoria durante 45 s, sin video; `fingerLag` objetivo es p95
+`≤66 ms` mediante `FingerRenderState` y filtro rápido de ángulos.
+Límite de codo predeterminado: `2.60 rad`, suficiente para llevar mano a cara;
+se puede reducir desde Ajustes si el rig produce pliegues excesivos.
+Requiere permiso de cámara e internet para WASM de MediaPipe.
+Para probar solo DTW offline: `./scripts/univoz.sh frontend --no-backend`.
+En teléfono físico usa `UNIVOZ_BACKEND_HOST=0.0.0.0` y
+`--backend-url http://IP_DE_LA_PC:8000`. Autocompletado Bash:
+`source <(./scripts/univoz.sh completion bash)`.
 
 ```bash
 python3 tools/gen_golden.py     # regenera el golden
@@ -34,21 +79,58 @@ está normalizando distinto que el servidor y que los prototipos guardados ya
 no son comparables con lo que ve la cámara. Es la falla más cara del sistema
 y sin este test tarda meses en aparecer.
 
-## El vector de 138 dimensiones
+## RigBody y captura
+
+`LandmarkFrameV1` fusiona pose de imagen, pose mundial, manos, timestamp,
+visibilidad y validez. Solo ese stream alimenta grabación y normalización;
+`frames_preview` queda para pintar UI. `MotionSequenceV2` exige exactamente
+`norm_version=2.0.0`, `32` frames y `152` valores por frame.
+
+La captura guarda secuencia normalizada, métricas, checksum y un sidecar gzip
+de landmarks sin video. El sidecar solo sube a Storage al pulsar la acción
+explícita en Sincronizar. El avatar reproduce la misma secuencia que usa DTW.
+
+Después de aplicar SQL, regenerá `assets/plantillas.json`. El asset incluido
+en checkout todavía es 138D y la app lo ignora por diseño; no se convierte
+automáticamente.
+
+## AI Engine opcional
+
+```bash
+cd ../backend/ai-engine
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+PYTHONPATH=. python -m ai_engine.server
+```
+
+`GET /health` publica contrato activo. `POST /v1/classify` recibe
+`norm_version` y `frames` 32x152. DTW local no depende de este servicio; si
+backend falla, la app conserva predicción local. Entrenamiento solo desde PC:
+
+```bash
+PYTHONPATH=. python -m ai_engine.train --output models
+```
+
+SVM entrenado se carga desde `AI_ENGINE_MODEL_DIR` (por defecto `models/`).
+Sin SVM, servidor puede cargar muestras aprobadas desde `DATABASE_URL` y usar
+kNN. Nunca pongas service key en APK.
+
+## El vector de 152 dimensiones
 
 Cada frame se convierte en un vector con esta estructura:
 
 | Rango    | Dim | Contenido |
 |----------|-----|-----------|
-| 0–11     | 12  | codos, muñecas y caderas en marco del cuerpo (x, y) |
-| 12–13    | 2   | muñeca izquierda respecto al cuerpo |
-| 14–15    | 2   | muñeca derecha respecto al cuerpo |
-| 16       | 1   | 1.0 si se detectó la mano izquierda |
-| 17       | 1   | 1.0 si se detectó la mano derecha |
-| 18–77    | 60  | forma de la mano izquierda: 20 puntos (x, y, z) |
-| 78–137   | 60  | forma de la mano derecha |
+| 0–23     | 24  | hombros, codos, muñecas y caderas en marco del cuerpo (x, y, z) |
+| 24–26    | 3   | muñeca izquierda respecto al cuerpo |
+| 27–29    | 3   | muñeca derecha respecto al cuerpo |
+| 30       | 1   | 1.0 si se detectó la mano izquierda |
+| 31       | 1   | 1.0 si se detectó la mano derecha |
+| 32–91    | 60  | forma de la mano izquierda: 20 puntos (x, y, z) |
+| 92–151   | 60  | forma de la mano derecha: 20 puntos (x, y, z) |
 
-Una seña completa son 32 frames × 138 floats. En float16 pesa **8.6 KB**,
+Una seña completa son 32 frames × 152 floats. En float16 pesa **9.5 KB**,
 que es lo que se guarda en `sample_landmarks.data`.
 
 ### Qué hace la normalización
@@ -99,7 +181,7 @@ Warping. No entrena nada: agregar una seña es agregar plantillas.
 
 ### La distancia entre frames no es euclidiana
 
-Este es el detalle que decide si funciona o no. Los 138 números no valen lo
+Este es el detalle que decide si funciona o no. Los 152 números no valen lo
 mismo: la forma de la mano ocupa 120 dimensiones y la ubicación solo 4. Una
 euclidiana plana dejaría que la forma se comiera todo el peso y la ubicación
 —que en lengua de señas distingue palabras— se volvería ruido.
@@ -126,7 +208,7 @@ para parecerse a otra.
 ### Prefiltro
 
 Un DTW completo contra 500 plantillas son ~20 millones de operaciones. El
-prefiltro compara primero el vector promedio de la secuencia (138
+prefiltro compara primero el vector promedio de la secuencia (152
 operaciones por plantilla) y solo corre el DTW completo sobre las 40 mejores
 candidatas. En los tests da el mismo resultado que la búsqueda exhaustiva.
 Además hay abandono temprano: una plantilla cuya fila acumulada ya supera

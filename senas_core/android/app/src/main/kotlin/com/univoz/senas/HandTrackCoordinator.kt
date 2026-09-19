@@ -58,6 +58,16 @@ class HandTrackCoordinator {
         var lastSeenMs: Long? = null,
         var hits: Int = 0,
         var statedSide: String? = null,
+        var detectedAtMs: Long? = null,
+        var pendingOrientation: DoubleArray? = null,
+        var pendingOrientationCount: Int = 0,
+        var lastRejectCode: String? = null,
+    )
+
+    private data class OrientationDecision(
+        val accepted: Boolean,
+        val pendingOrientation: DoubleArray?,
+        val pendingCount: Int,
     )
 
     private var left = Track("left")
@@ -73,6 +83,7 @@ class HandTrackCoordinator {
         pose: PoseHint?,
         timestampMs: Long,
     ): Result {
+        val tooManyCandidates = rawCandidates.size > 2
         val candidates = rawCandidates.filter {
             it.points.size == 63 && it.points.all(Double::isFinite)
         }.take(2)
@@ -87,6 +98,9 @@ class HandTrackCoordinator {
         }
         val assigned = mutableMapOf<String, Candidate?>("left" to null, "right" to null)
         val assignedCosts = mutableMapOf<String, Double?>("left" to null, "right" to null)
+        var assignmentHysteresis = false
+        left.detectedAtMs = null
+        right.detectedAtMs = null
         fun canAssign(candidate: Candidate, value: Double): Boolean =
             value <= .65 || (candidate.sideLocked && value <= .95)
 
@@ -98,13 +112,51 @@ class HandTrackCoordinator {
                 normal.isFinite() && crossed.isFinite() &&
                 abs(normal - crossed) < margin
             if (!ambiguous) {
-                val pairs = if (normal <= crossed) {
-                    listOf("left" to 0, "right" to 1)
-                } else {
-                    listOf("left" to 1, "right" to 0)
+                // Pose arm-chain labels are authoritative only when they agree
+                // with temporal continuity. Hold one bad frame during fast
+                // crossings instead of exchanging physical hands.
+                val neutralMatrix = candidates.map { candidate ->
+                    mapOf(
+                        "left" to cost(left, candidate, pose, timestampMs,
+                            contactBefore, ignoreSide = true),
+                        "right" to cost(right, candidate, pose, timestampMs,
+                            contactBefore, ignoreSide = true),
+                    )
                 }
+                val temporalNormal = neutralMatrix[0].getValue("left") +
+                    neutralMatrix[1].getValue("right")
+                val temporalCrossed = neutralMatrix[0].getValue("right") +
+                    neutralMatrix[1].getValue("left")
+                val labelMode: String? = when {
+                    normal.isFinite() && (!crossed.isFinite() || normal <= crossed) -> "normal"
+                    crossed.isFinite() -> "crossed"
+                    else -> null
+                }
+                val temporalMode: String? = when {
+                    temporalNormal.isFinite() && temporalCrossed.isFinite() &&
+                        abs(temporalNormal - temporalCrossed) >= margin &&
+                        temporalNormal <= temporalCrossed -> "normal"
+                    temporalNormal.isFinite() && temporalCrossed.isFinite() &&
+                        abs(temporalNormal - temporalCrossed) >= margin -> "crossed"
+                    else -> null
+                }
+                var selectedMode = labelMode
+                // One paired frame already establishes identity; waiting for
+                // TRACKING state leaves first fast crossing exposed.
+                val established = left.hits >= 1 && right.hits >= 1
+                if (established && labelMode != null && temporalMode != null &&
+                    labelMode != temporalMode) {
+                    selectedMode = temporalMode
+                    assignmentHysteresis = true
+                }
+                val selectedMatrix = if (selectedMode == labelMode) matrix else neutralMatrix
+                val pairs = if (selectedMode == "normal") {
+                    listOf("left" to 0, "right" to 1)
+                } else if (selectedMode == "crossed") {
+                    listOf("left" to 1, "right" to 0)
+                } else emptyList()
                 pairs.forEach { (side, index) ->
-                    val value = matrix[index].getValue(side)
+                    val value = selectedMatrix[index].getValue(side)
                     if (canAssign(candidates[index], value)) {
                         assigned[side] = candidates[index]
                         assignedCosts[side] = value
@@ -131,6 +183,8 @@ class HandTrackCoordinator {
             shoulderWidth,
             assignedCosts,
             candidates.any { it.sideAmbiguous },
+            assignmentHysteresis,
+            tooManyCandidates,
         )
     }
 
@@ -140,6 +194,7 @@ class HandTrackCoordinator {
             timestampMs,
             max(.05, shoulderWidth),
             mapOf("left" to null, "right" to null),
+            includeDetected = false,
         )
 
     private fun result(
@@ -147,9 +202,12 @@ class HandTrackCoordinator {
         shoulderWidth: Double,
         costs: Map<String, Double?>,
         sideAmbiguous: Boolean = false,
+        assignmentHysteresis: Boolean = false,
+        tooManyCandidates: Boolean = false,
+        includeDetected: Boolean = true,
     ): Result {
-        val leftView = view(left, timestampMs)
-        val rightView = view(right, timestampMs)
+        val leftView = view(left, timestampMs, includeDetected)
+        val rightView = view(right, timestampMs, includeDetected)
         val wristDistance = if (leftView.render != null && rightView.render != null) {
             pointDistance(leftView.render, rightView.render, 0) / shoulderWidth
         } else null
@@ -160,19 +218,57 @@ class HandTrackCoordinator {
             "stage" to "association", "code" to "hand_occluded", "side" to "left")
         if (rightView.state == "OCCLUDED") errors += mapOf(
             "stage" to "association", "code" to "hand_occluded", "side" to "right")
-        if (left.statedSide != null && left.statedSide != "left") errors += mapOf(
+        if (!assignmentHysteresis && left.statedSide != null && left.statedSide != "left") errors += mapOf(
             "stage" to "association", "code" to "hand_identity_swap", "side" to "left")
-        if (right.statedSide != null && right.statedSide != "right") errors += mapOf(
+        if (!assignmentHysteresis && right.statedSide != null && right.statedSide != "right") errors += mapOf(
             "stage" to "association", "code" to "hand_identity_swap", "side" to "right")
+        if (left.lastRejectCode != null) errors += mapOf(
+            "stage" to "association", "code" to left.lastRejectCode!!,
+            "side" to "left", "action" to "hold_previous")
+        if (right.lastRejectCode != null) errors += mapOf(
+            "stage" to "association", "code" to right.lastRejectCode!!,
+            "side" to "right", "action" to "hold_previous")
         if (sideAmbiguous) errors += mapOf(
             "stage" to "association", "code" to "hand_side_ambiguous")
+        if (assignmentHysteresis) errors += mapOf(
+            "stage" to "association", "code" to "hand_assignment_hysteresis",
+            "action" to "hold_temporal_identity")
+        if (tooManyCandidates) errors += mapOf(
+            "stage" to "capture", "code" to "too_many_hand_candidates",
+            "action" to "reject_excess_candidates")
         return Result(leftView, rightView, contact, wristDistance, costs, errors)
     }
 
     private fun updateTrack(track: Track, candidate: Candidate?, timestampMs: Long) {
+        track.lastRejectCode = null
         if (candidate == null) return
         val previous = track.points
         val lastSeen = track.lastSeenMs
+        if (lastSeen != null && timestampMs <= lastSeen) {
+            track.lastRejectCode = "stale_frame"
+            return
+        }
+        val currentOrientation = palmOrientation(candidate.points)
+        if (currentOrientation == null) {
+            track.lastRejectCode = "hand_geometry_degenerate"
+            return
+        }
+        val wristDisplacement = if (previous == null) 0.0 else pointDistance(
+            candidate.points, previous, 0)
+        val orientationDecision = handSurfaceTransition(
+            track.orientation,
+            currentOrientation,
+            wristDisplacement,
+            .4,
+            track.pendingOrientation,
+            track.pendingOrientationCount,
+        )
+        track.pendingOrientation = orientationDecision.pendingOrientation
+        track.pendingOrientationCount = orientationDecision.pendingCount
+        if (!orientationDecision.accepted) {
+            track.lastRejectCode = "hand_surface_flip"
+            return
+        }
         if (previous != null && lastSeen != null && timestampMs > lastSeen) {
             val dt = max(.001, (timestampMs - lastSeen) / 1000.0)
             val vx = (candidate.points[0] - previous[0]) / dt
@@ -183,15 +279,39 @@ class HandTrackCoordinator {
             track.velocityZ = vz * .65 + track.velocityZ * .35
         }
         track.points = candidate.points.copyOf()
-        track.orientation = palmOrientation(candidate.points)
+        track.orientation = currentOrientation
         track.confidence = clamp(candidate.confidence)
         track.lastSeenMs = timestampMs
+        track.detectedAtMs = timestampMs
         track.hits++
         track.statedSide = candidate.side?.lowercase()
         track.state = if (track.hits >= 2) "TRACKING" else "TENTATIVE"
     }
 
-    private fun view(track: Track, timestampMs: Long): TrackView {
+    private fun handSurfaceTransition(
+        previous: DoubleArray?,
+        current: DoubleArray?,
+        wristDisplacement: Double,
+        shoulderWidth: Double,
+        pendingOrientation: DoubleArray?,
+        pendingCount: Int,
+    ): OrientationDecision {
+        val orientation = orientationDistance(previous, current)
+        val width = max(.05, shoulderWidth)
+        val suspicious = previous != null && current != null &&
+            orientation >= .60 && wristDisplacement / width <= .40
+        if (!suspicious) return OrientationDecision(true, null, 0)
+        val repeats = pendingOrientation != null &&
+            orientationDistance(pendingOrientation, current) < .25
+        val nextCount = if (repeats) max(0, pendingCount) + 1 else 1
+        return if (nextCount >= 2) {
+            OrientationDecision(true, null, 0)
+        } else {
+            OrientationDecision(false, current, nextCount)
+        }
+    }
+
+    private fun view(track: Track, timestampMs: Long, includeDetected: Boolean): TrackView {
         val points = track.points
         val lastSeen = track.lastSeenMs
         if (points == null || lastSeen == null) {
@@ -202,7 +322,7 @@ class HandTrackCoordinator {
             return TrackView(track.side, "LOST", null, null,
                 track.velocityX, track.velocityY, track.confidence, 1.0)
         }
-        val visible = elapsed == 0L
+        val visible = includeDetected && track.detectedAtMs == timestampMs
         val predictMs = min(300L, elapsed)
         val render = points.copyOf()
         if (!visible) {
@@ -235,8 +355,9 @@ class HandTrackCoordinator {
         pose: PoseHint?,
         timestampMs: Long,
         contact: Boolean,
+        ignoreSide: Boolean = false,
     ): Double {
-        if (candidate.sideLocked && candidate.side?.lowercase() != track.side) {
+        if (!ignoreSide && candidate.sideLocked && candidate.side?.lowercase() != track.side) {
             return Double.POSITIVE_INFINITY
         }
         val width = max(.05, pose?.shoulderWidth ?: .4)
@@ -261,7 +382,11 @@ class HandTrackCoordinator {
             ) * .25)
         }
         val orientation = orientationDistance(track.orientation, palmOrientation(candidate.points))
-        val stated = candidate.side?.lowercase().orEmpty()
+        // Ambiguous/pending candidates must not influence association with
+        // HandLandmarker handedness; pose arm-chain or temporal continuity
+        // remain authoritative.
+        val stated = if (ignoreSide || candidate.sideAmbiguous) "" else
+            candidate.side?.lowercase().orEmpty()
         val side = if (stated.isEmpty()) .5 else if (stated == track.side) 0.0 else 1.0
         val confidence = 1.0 - clamp(candidate.confidence)
         return .45 * position + .20 * velocity + .20 * orientation +
@@ -279,24 +404,53 @@ class HandTrackCoordinator {
         )
     }
 
-    private fun palmOrientation(points: DoubleArray): DoubleArray? {
-        if (points.size < 54) return null
+    internal fun palmOrientation(points: DoubleArray): DoubleArray? {
+        if (points.size < 63) return null
         fun unit(ax: Double, ay: Double, az: Double): DoubleArray? {
             val length = sqrt(ax * ax + ay * ay + az * az)
             return if (length <= 1e-8) null else
                 doubleArrayOf(ax / length, ay / length, az / length)
         }
-        val across = unit(
-            points[5 * 3] - points[17 * 3],
-            points[5 * 3 + 1] - points[17 * 3 + 1],
-            points[5 * 3 + 2] - points[17 * 3 + 2],
-        ) ?: return null
+        val wrist = doubleArrayOf(points[0], points[1], points[2])
+        val cmc = doubleArrayOf(points[3], points[4], points[5])
         val forward = unit(
-            points[9 * 3] - points[0],
-            points[9 * 3 + 1] - points[1],
-            points[9 * 3 + 2] - points[2],
+            points[9 * 3] - wrist[0],
+            points[9 * 3 + 1] - wrist[1],
+            points[9 * 3 + 2] - wrist[2],
         ) ?: return null
-        return across + forward
+        val index = doubleArrayOf(points[5 * 3], points[5 * 3 + 1], points[5 * 3 + 2])
+        val little = doubleArrayOf(points[17 * 3], points[17 * 3 + 1], points[17 * 3 + 2])
+        val indexFromWrist = doubleArrayOf(
+            index[0] - wrist[0], index[1] - wrist[1], index[2] - wrist[2],
+        )
+        val littleFromWrist = doubleArrayOf(
+            little[0] - wrist[0], little[1] - wrist[1], little[2] - wrist[2],
+        )
+        val normal = unit(
+            indexFromWrist[1] * littleFromWrist[2] -
+                indexFromWrist[2] * littleFromWrist[1],
+            indexFromWrist[2] * littleFromWrist[0] -
+                indexFromWrist[0] * littleFromWrist[2],
+            indexFromWrist[0] * littleFromWrist[1] -
+                indexFromWrist[1] * littleFromWrist[0],
+        ) ?: return null
+        var radial = unit(
+            normal[1] * forward[2] - normal[2] * forward[1],
+            normal[2] * forward[0] - normal[0] * forward[2],
+            normal[0] * forward[1] - normal[1] * forward[0],
+        ) ?: return null
+        val cmcFromWrist = doubleArrayOf(
+            cmc[0] - wrist[0], cmc[1] - wrist[1], cmc[2] - wrist[2],
+        )
+        val radialDot = cmcFromWrist[0] * radial[0] +
+            cmcFromWrist[1] * radial[1] + cmcFromWrist[2] * radial[2]
+        if (!radialDot.isFinite() || abs(radialDot) <= 1e-8) return null
+        var correctedNormal = normal
+        if (radialDot < 0) {
+            radial = radial.map { -it }.toDoubleArray()
+            correctedNormal = normal.map { -it }.toDoubleArray()
+        }
+        return radial + forward + correctedNormal
     }
 
     private fun orientationDistance(a: DoubleArray?, b: DoubleArray?): Double {
@@ -304,7 +458,13 @@ class HandTrackCoordinator {
         fun aligned(offset: Int): Double = clamp((
             a[offset] * b[offset] + a[offset + 1] * b[offset + 1] +
                 a[offset + 2] * b[offset + 2] + 1.0) / 2.0)
-        return 1.0 - (aligned(0) + aligned(3)) / 2.0
+        var sum = aligned(0) + aligned(3)
+        var count = 2
+        if (a.size >= 9 && b.size >= 9) {
+            sum += aligned(6)
+            count++
+        }
+        return 1.0 - sum / count
     }
 
     private fun isContact(a: DoubleArray, b: DoubleArray, shoulderWidth: Double): Boolean {

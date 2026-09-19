@@ -88,10 +88,10 @@ class LandmarkEngine(
     private var manosConocidas = false
     private val handTracker = HandTrackCoordinator()
     private var ultimoTracking: HandTrackCoordinator.Result? = null
+    private var ultimoAssignmentMode = "pose_pending"
 
     private data class ManoCandidata(
         val puntos: DoubleArray,
-        val etiqueta: String?,
         val confianza: Double,
         val muñecaX: Double,
         val muñecaY: Double,
@@ -236,6 +236,7 @@ class LandmarkEngine(
             "right_state" to tracking.right.state,
             "left_cost" to tracking.costs["left"],
             "right_cost" to tracking.costs["right"],
+            "hand_assignment_mode" to ultimoAssignmentMode,
             "contact" to tracking.contact,
             "contact_wrist_distance" to tracking.contactWristDistance,
         )
@@ -338,7 +339,7 @@ class LandmarkEngine(
         }
 
         val manos = result.landmarks()
-        val lados = result.handednesses()
+        val categorias = result.handednesses()
         val candidatas = mutableListOf<ManoCandidata>()
         val erroresEntrada = mutableListOf<Map<String, String>>()
         for (i in manos.indices) {
@@ -368,44 +369,40 @@ class LandmarkEngine(
             }
             candidatas += ManoCandidata(
                 puntos = arr,
-                etiqueta = lados.getOrNull(i)?.firstOrNull()?.categoryName(),
-                confianza = lados.getOrNull(i)?.firstOrNull()?.score()?.toDouble() ?: .5,
+                // Conservar score para calidad; nunca usar categoryName para
+                // decidir lado físico.
+                confianza = categorias.getOrNull(i)?.firstOrNull()?.score()
+                    ?.toDouble() ?: .5,
                 muñecaX = lm[0].x().toDouble(),
                 muñecaY = lm[0].y().toDouble(),
             )
         }
         val poseCadenaDisponible = poseParaLados != null &&
             poseParaLados.size >= 33 * 4 && poseTieneCadenaBrazo(poseParaLados)
-        val poseMunecasDisponibles = poseParaLados != null &&
-            poseParaLados.size >= 33 * 4 && poseTieneMunecas(poseParaLados)
         val ladosCadena = if (poseCadenaDisponible) {
             asignarLadosCadena(candidatas, poseParaLados!!)
         } else emptyList()
-        val cadenaAmbigua = poseCadenaDisponible &&
-            candidatas.isNotEmpty() &&
-            ladosCadena.size == candidatas.size &&
-            ladosCadena.all { it == null }
+        ultimoAssignmentMode = when {
+            !poseCadenaDisponible -> "pose_pending"
+            ladosCadena.any { it != null } -> "pose_arm_chain"
+            else -> "ambiguous"
+        }
         val trackCandidates = candidatas.mapIndexed { index, candidata ->
             val ladoCadena = ladosCadena.getOrNull(index)
-            val side = if (cadenaAmbigua) null else ladoCadena ?: if (poseMunecasDisponibles) {
-                ladoPorMunecaPose(candidata, poseParaLados!!)
-                    ?: ladoFisicoMano(candidata.etiqueta, candidata.muñecaX)
-            } else {
-                ladoFisicoMano(candidata.etiqueta, candidata.muñecaX)
-            }
             HandTrackCoordinator.Candidate(
                 candidata.puntos,
-                side,
+                ladoCadena,
                 candidata.confianza,
                 sideLocked = ladoCadena != null,
-                sideAmbiguous = cadenaAmbigua,
+                // No usar etiqueta HandLandmarker antes de autoridad Pose.
+                sideAmbiguous = !poseCadenaDisponible || ladoCadena == null,
             )
         }
 
         var fusionado: FrameResult? = null
         val preview = synchronized(ultimoLock) {
             val poseHint = poseParaLados?.takeIf {
-                it.size >= 33 * 4 && poseTieneMunecas(it)
+                poseCadenaDisponible && it.size >= 33 * 4
             }?.let {
                 HandTrackCoordinator.PoseHint(
                     it[15 * 4], it[15 * 4 + 1],
@@ -454,30 +451,6 @@ class LandmarkEngine(
         }
         onPreview(preview)
         fusionado?.let(onFrame)
-    }
-
-    /** Devuelve lado fisico; null evita inventar lado con mano en el centro. */
-    private fun ladoFisicoMano(etiqueta: String?, muñecaX: Double): String? {
-        val raw = etiqueta.orEmpty()
-        // Fallback solamente. La geometria pose-muneca tiene prioridad porque
-        // la etiqueta de Hand Landmarker asume selfie espejado y puede quedar
-        // invertida cuando ImageAnalysis entrega el bitmap crudo.
-        if (raw.contains("left", ignoreCase = true)) return "right"
-        if (raw.contains("right", ignoreCase = true)) return "left"
-        return when {
-            muñecaX > 0.52 -> "left"
-            muñecaX < 0.48 -> "right"
-            else -> null
-        }
-    }
-
-    private fun poseTieneMunecas(pose: DoubleArray): Boolean {
-        return (15..16).all { i ->
-            pose[i * 4].isFinite() &&
-                pose[i * 4 + 1].isFinite() &&
-                pose[i * 4 + 3].isFinite() &&
-                pose[i * 4 + 3] >= MIN_POSE_WRIST_VISIBILITY
-        }
     }
 
     private fun poseTieneCadenaBrazo(pose: DoubleArray): Boolean {
@@ -558,28 +531,6 @@ class LandmarkEngine(
         return endpoint + direction * .35 + chain * .20
     }
 
-    private fun ladoPorMunecaPose(
-        mano: ManoCandidata,
-        pose: DoubleArray,
-    ): String? {
-        val izquierda = distanciaPoseMano(mano, pose, 15)
-        val derecha = distanciaPoseMano(mano, pose, 16)
-        val hombros = distanciaPose(pose, 11, 12)
-        val margen = max(0.035, hombros * 0.12)
-        if (abs(izquierda - derecha) <= margen) return null
-        return if (izquierda < derecha) "left" else "right"
-    }
-
-    private fun distanciaPoseMano(
-        mano: ManoCandidata,
-        pose: DoubleArray,
-        indicePose: Int,
-    ): Double {
-        val dx = mano.muñecaX - pose[indicePose * 4]
-        val dy = mano.muñecaY - pose[indicePose * 4 + 1]
-        return hypot(dx, dy)
-    }
-
     private fun distanciaPose(pose: DoubleArray, a: Int, b: Int): Double {
         val dx = pose[a * 4] - pose[b * 4]
         val dy = pose[a * 4 + 1] - pose[b * 4 + 1]
@@ -598,6 +549,7 @@ class LandmarkEngine(
             ultimoTimestampManos = Long.MIN_VALUE
             manosConocidas = false
             ultimoTracking = null
+            ultimoAssignmentMode = "pose_pending"
             handTracker.reset()
         }
         synchronized(manosLock) { manosEnVuelo = false }

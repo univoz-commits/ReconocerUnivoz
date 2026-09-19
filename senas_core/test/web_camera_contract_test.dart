@@ -6,6 +6,8 @@ void main() {
   test('visor web expone cámara MediaPipe y contrato Motion V2', () {
     final html = File('assets/avatar_viewer/index.html').readAsStringSync();
     final bridge = File('lib/camera_bridge.dart').readAsStringSync();
+    final tracking =
+        File('assets/avatar_viewer/rig_tracking.mjs').readAsStringSync();
 
     expect(html, contains('getUserMedia'));
     expect(html, contains('PoseLandmarker'));
@@ -29,11 +31,11 @@ void main() {
     expect(html, isNot(contains('performance.timeOrigin + performance.now')));
     expect(html, contains('if (webCameraState.running)'));
     expect(html, contains('webCameraState.running = false'));
-    expect(html, contains("if (raw.includes('left')) return 'right';"));
-    expect(html, contains("if (raw.includes('right')) return 'left';"));
-    expect(html, contains('function ladoFisicoManoWeb'));
-    expect(html, contains('function poseMunecaConfiableWeb'));
-    expect(html, contains('punto.visibility >= 0.35'));
+    expect(html, contains('resolveAnatomicalHandSide'));
+    expect(html, contains('pose_pending'));
+    expect(html, contains('sideLocked'));
+    expect(html, isNot(contains('function ladoFisicoManoWeb')));
+    expect(html, isNot(contains('function poseMunecaConfiableWeb')));
     expect(html, contains('function puntoEnCuadroWeb'));
     expect(html, contains('createRigSafetyGate'));
     expect(html, contains('maxAngularVelocityRadS'));
@@ -48,13 +50,29 @@ void main() {
     expect(html, contains('actualizarEstadoPerdidaMano'));
     expect(html, contains('camaraReposoMano'));
     expect(html, contains('const centroHombros ='));
-    expect(html, contains('muñeca.x > centroHombros'));
+    expect(html, contains('H-I'));
+    expect(html, contains('H-D'));
     expect(html, contains('I:'));
     expect(html, isNot(contains('else if (!left) left = manos[i];')));
     expect(html, isNot(contains('id="camaraEspejo"')));
     expect(html, isNot(contains('camaraVideo.espejo')));
-    expect(html, isNot(contains('if (typeof webHandTracker !== \'undefined\')')));
+    expect(
+        html, isNot(contains('if (typeof webHandTracker !== \'undefined\')')));
     expect(html, contains('hand_side_ambiguous'));
+    expect(html, contains('hand_assignment_hysteresis'));
+    expect(html, contains('motionScore'));
+    expect(html, contains('fingerMotionScore'));
+    expect(html, contains('renderFps'));
+    expect(html, contains('renderPixelRatio'));
+    expect(html, contains('captureFps'));
+    expect(html, contains('poseP95Ms'));
+    expect(html, contains('handP95Ms'));
+    expect(html, contains('processP95Ms'));
+    expect(tracking, contains('hand_surface_flip'));
+    expect(tracking, contains('handSurfaceTransition'));
+    expect(html, contains('wristDisagreementState'));
+    expect(html, contains('state.frames >= 3'));
+    expect(html, contains('droppedVideoFrames'));
     expect(html, contains('if (vrm) posarReposo();'));
     expect(html, contains('suavizarFrameWeb'));
     expect(html, contains('Suavizar movimiento'));
@@ -75,7 +93,10 @@ void main() {
     expect(html, contains('frameVivoExterno'));
     expect(html, contains('frameVivoStale'));
     expect(html, contains('frameVivoRecibidoAt = performance.now()'));
-    expect(html, contains('const streamExternoEnVivo = !standaloneWeb && frameVivoExterno'));
+    expect(
+        html,
+        contains(
+            'const streamExternoEnVivo = !standaloneWeb && frameVivoExterno'));
     expect(html, isNot(contains('id="sProf"')));
     expect(html, contains('Q:'));
     expect(html, contains('rig_safety.mjs'));
@@ -84,5 +105,18 @@ void main() {
     expect(html, contains('webPoseCache'));
     expect(html, contains('Hands run every accepted frame'));
     expect(bridge, contains('swapHands: false'));
+  });
+
+  test('visor web directo activa standalone sin depender de query manual', () {
+    final html = File('assets/avatar_viewer/index.html').readAsStringSync();
+
+    expect(html, contains("!window.SenasChannel"));
+    expect(html, contains("window.location.protocol"));
+  });
+
+  test('raíz del servidor web redirige al visor standalone', () {
+    final html = File('index.html').readAsStringSync();
+
+    expect(html, contains('assets/avatar_viewer/index.html?standalone=1'));
   });
 }

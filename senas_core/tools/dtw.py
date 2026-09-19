@@ -137,7 +137,7 @@ def dtw_distance(a, b, band=BAND, ceiling=None):
 
 def signature(seq):
     """Vector promedio de la secuencia. Se usa como prefiltro barato:
-    138 operaciones por plantilla en vez de los ~40 mil de un DTW completo."""
+    152 operaciones por plantilla en vez de los ~40 mil de un DTW completo."""
     n = len(seq)
     sig = [0.0] * FRAME_DIM
     for f in seq:

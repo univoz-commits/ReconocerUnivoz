@@ -319,6 +319,43 @@ export function createResponsiveRigFilter(options = {}) {
   let histories = [];
   let jumpStreak = [];
 
+  const emptyMotion = () => ({
+    motionScore: 0,
+    fingerMotionScore: 0,
+    motionByGroup: {body: 0, wrist: 0, shape: 0, presence: 0},
+    intentionalMotion: false,
+    quiet: true,
+  });
+  const motionDiagnostics = (frame) => {
+    if (!previousRaw) return emptyMotion();
+    const sums = {body: 0, wrist: 0, shape: 0, presence: 0};
+    const thresholds = {
+      body: Math.max(deadbands.body * 2, configs.body.intentional),
+      wrist: Math.max(deadbands.wrist * 2, configs.wrist.intentional),
+      shape: configs.shape.intentional,
+      presence: .5,
+    };
+    for (let i = 0; i < FRAME_DIM; i++) {
+      const group = groupFor(i);
+      const delta = Math.abs(Number(frame[i]) - previousRaw[i]);
+      sums[group] += delta ** 2;
+    }
+    const motionByGroup = Object.fromEntries(Object.keys(sums).map((group) => {
+      // Vector norm avoids one noisy coordinate turning whole body into motion.
+      return [group, clamp(Math.sqrt(sums[group]) / thresholds[group])];
+    }));
+    // Presence flags describe detector availability, not user motion. Shape
+    // has its own fast path; body score controls torso/arm deadband.
+    const motionScore = Math.max(motionByGroup.body, motionByGroup.wrist);
+    return {
+      motionScore,
+      fingerMotionScore: motionByGroup.shape,
+      motionByGroup,
+      intentionalMotion: motionScore >= .8,
+      quiet: motionScore < .25,
+    };
+  };
+
   const reset = () => {
     previous = null;
     previousRaw = null;
@@ -326,6 +363,14 @@ export function createResponsiveRigFilter(options = {}) {
     filters = [];
     histories = [];
     jumpStreak = [];
+  };
+
+  const setDeadbands = (next = {}) => {
+    for (const group of ['body', 'wrist', 'shape']) {
+      const value = Number(next[group]);
+      if (Number.isFinite(value) && value >= 0) deadbands[group] = value;
+    }
+    return {...deadbands};
   };
 
   const filter = (frame, timestampMs, quality = 1) => {
@@ -347,20 +392,24 @@ export function createResponsiveRigFilter(options = {}) {
       histories = frame.map((value) => [Number(value)]);
       jumpStreak = Array(FRAME_DIM).fill(0);
       return {frame: previous.slice(), diagnostics: {
-        madOutliers: [], jumpRejected: [], deadbandHeld: 0,
+        madOutliers: [], madRepaired: [], jumpRejected: [], deadbandHeld: 0,
         delayMs: 0, rawToFilteredRms: 0, timestampRejected: false,
+        ...emptyMotion(),
       }};
     }
     if (!Number.isFinite(t) || t <= previousTime) {
       return {frame: previous.slice(), diagnostics: {
-        madOutliers: [], jumpRejected: [], deadbandHeld: 0,
+        madOutliers: [], madRepaired: [], jumpRejected: [], deadbandHeld: 0,
         delayMs: 0, rawToFilteredRms: 0, timestampRejected: true,
+        ...emptyMotion(),
       }};
     }
 
     const dtMs = clamp(t - previousTime, 1, 200);
+    const motion = motionDiagnostics(frame);
     const output = previous.slice();
     const madOutliers = [];
+    const madRepaired = [];
     const jumpRejected = [];
     let deadbandHeld = 0;
     const delays = [];
@@ -380,9 +429,33 @@ export function createResponsiveRigFilter(options = {}) {
       if ((belongsLeft && !presentLeft) || (belongsRight && !presentRight)) continue;
 
       const history = histories[i];
-      if (madState(history, value)) madOutliers.push(i);
+      const madOutlier = madState(history, value);
+      if (madOutlier) madOutliers.push(i);
       history.push(value);
       if (history.length > 5) history.shift();
+
+      // A quiet group cannot move the avatar. This catches coordinated small
+      // calibration drift while still letting MAD observe the sample first.
+      if ((group === 'body' || group === 'wrist') &&
+          motion.motionByGroup[group] < .25) {
+        output[i] = previous[i];
+        deadbandHeld++;
+        continue;
+      }
+
+      // A quiet isolated deviation is more likely detector noise than user
+      // motion. Keep raw untouched, but hold visual state before One Euro so
+      // the spike cannot start a visible excursion. Intentional group motion
+      // bypasses this repair and remains responsive.
+      const groupIntentional = group === 'shape'
+        ? motion.fingerMotionScore >= .8 : motion.motionScore >= .8;
+      const repairThreshold = Math.max(deadbands[group] ?? 0, .005);
+      if (madOutlier && !groupIntentional &&
+          Math.abs(value - previous[i]) > repairThreshold) {
+        output[i] = previous[i];
+        madRepaired.push(i);
+        continue;
+      }
 
       // Finger shape stays raw here. Filtering XYZ before deriving joint
       // angles adds latency and bends chains. moverMano filters 15 angles.
@@ -419,12 +492,164 @@ export function createResponsiveRigFilter(options = {}) {
     previousTime = t;
     return {frame: output.slice(), diagnostics: {
       madOutliers,
+      madRepaired,
       jumpRejected,
       deadbandHeld,
       delayMs: median(delays),
       rawToFilteredRms: Math.sqrt(error / FRAME_DIM),
       timestampRejected: false,
+      ...motion,
     }};
   };
-  return {filter, reset};
+  return {filter, reset, setDeadbands, getDeadbands: () => ({...deadbands})};
+}
+
+const calibrationGroups = {
+  bodyLeft: [0, 1, 2, 6, 7, 8, 12, 13, 14, 18, 19, 20],
+  bodyRight: [3, 4, 5, 9, 10, 11, 15, 16, 17, 21, 22, 23],
+  wristLeft: [24, 25, 26],
+  wristRight: [27, 28, 29],
+};
+
+function robustSigma(values) {
+  if (!values.length) return 0;
+  const center = median(values);
+  return 1.4826 * median(values.map((value) => Math.abs(value - center)));
+}
+
+/** Automatic quiet-state calibration for body/wrist deadbands. */
+export function createAdaptiveMotionCalibrator(options = {}) {
+  const warmupMs = Math.max(0, Number(options.warmupMs) || 1500);
+  const minSamples = Math.max(1, Math.floor(Number(options.minSamples) || 15));
+  const base = {
+    body: Math.max(0, Number(options.deadbands?.body ?? .003)),
+    wrist: Math.max(0, Number(options.deadbands?.wrist ?? .004)),
+  };
+  const samples = {bodyLeft: [], bodyRight: [], wristLeft: [], wristRight: []};
+  let previous = null;
+  let previousTime = null;
+  let startedAt = null;
+  let locked = false;
+  let state = 'WARMUP';
+  let deadbands = {...base};
+
+  const reset = () => {
+    for (const values of Object.values(samples)) values.length = 0;
+    previous = null;
+    previousTime = null;
+    startedAt = null;
+    locked = false;
+    state = 'WARMUP';
+    deadbands = {...base};
+  };
+
+  const snapshot = () => {
+    const noise = {
+      bodyLeft: robustSigma(samples.bodyLeft),
+      bodyRight: robustSigma(samples.bodyRight),
+      wristLeft: robustSigma(samples.wristLeft),
+      wristRight: robustSigma(samples.wristRight),
+    };
+    noise.body = Math.max(noise.bodyLeft, noise.bodyRight);
+    noise.wrist = Math.max(noise.wristLeft, noise.wristRight);
+    return {
+      state,
+      locked,
+      deadbands: {...deadbands},
+      noise,
+      samples: {
+        body: samples.bodyLeft.length + samples.bodyRight.length,
+        wrist: samples.wristLeft.length + samples.wristRight.length,
+      },
+    };
+  };
+
+  const update = (frame, timestampMs, motionScore = 0) => {
+    const values = Array.isArray(frame) ? frame.map(Number) : null;
+    const t = Number(timestampMs);
+    if (!values || values.length !== FRAME_DIM ||
+        values.some((value) => !Number.isFinite(value)) || !Number.isFinite(t) ||
+        (previousTime != null && t <= previousTime)) return snapshot();
+    if (startedAt == null) startedAt = t;
+    const score = Number.isFinite(Number(motionScore)) ? Number(motionScore) : 0;
+    if (previous) {
+      const delta = (indices) => Math.sqrt(indices.reduce((sum, index) =>
+        sum + (values[index] - previous[index]) ** 2, 0) / indices.length);
+      if (score < .25) {
+        for (const [name, indices] of Object.entries(calibrationGroups)) {
+          const value = delta(indices);
+          const list = samples[name];
+          list.push(value);
+          if (list.length > 120) list.shift();
+        }
+      }
+    }
+    previous = values;
+    previousTime = t;
+    const quiet = score < .25;
+    state = quiet ? (locked ? 'LOCKED' : 'WARMUP') : 'MOTION';
+    const elapsed = t - startedAt;
+    const enough = samples.bodyLeft.length >= minSamples &&
+      samples.bodyRight.length >= minSamples &&
+      samples.wristLeft.length >= minSamples &&
+      samples.wristRight.length >= minSamples;
+    if (!locked && quiet && elapsed >= warmupMs && enough) locked = true;
+    if (locked && quiet) {
+      const current = snapshot().noise;
+      deadbands = {
+        body: Math.max(base.body, current.body * 4),
+        wrist: Math.max(base.wrist, current.wrist * 4),
+      };
+      state = 'LOCKED';
+    }
+    return snapshot();
+  };
+  return {update, reset, snapshot};
+}
+
+/** Pose stride controller; hands/fingers remain on every input frame. */
+export function createAdaptivePoseScheduler(options = {}) {
+  const minStride = Math.max(1, Math.floor(Number(options.minStride) || 2));
+  const maxStride = Math.max(minStride, Math.floor(Number(options.maxStride) || 4));
+  const degradeAfterMs = Math.max(250, Number(options.degradeAfterMs) || 1500);
+  const recoverAfterMs = Math.max(250, Number(options.recoverAfterMs) || 2000);
+  const processLimitMs = Math.max(1, Number(options.processLimitMs) || 50);
+  let stride = minStride;
+  let badSince = null;
+  let goodSince = null;
+
+  const reset = () => {
+    stride = minStride;
+    badSince = null;
+    goodSince = null;
+  };
+  const update = (timestampMs, metrics = {}) => {
+    const t = Number(timestampMs);
+    if (!Number.isFinite(t)) return {stride, degraded: stride > minStride};
+    const processP95 = Number(metrics.processP95Ms);
+    const inputFps = Number(metrics.inputFps);
+    const bad = (Number.isFinite(processP95) && processP95 > processLimitMs) ||
+      (Number.isFinite(inputFps) && inputFps > 0 && inputFps < 30);
+    if (bad) {
+      goodSince = null;
+      if (badSince == null) badSince = t;
+      if (t - badSince >= degradeAfterMs) {
+        if (stride < maxStride) stride++;
+        badSince = t;
+      }
+    } else {
+      badSince = null;
+      if (goodSince == null) goodSince = t;
+      if (t - goodSince >= recoverAfterMs) {
+        if (stride > minStride) stride--;
+        goodSince = t;
+      }
+    }
+    return {stride, degraded: stride > minStride};
+  };
+  const shouldRun = (frameIndex, hasPose) => {
+    const index = Math.max(0, Math.floor(Number(frameIndex) || 0));
+    return hasPose !== true || index % stride === 0;
+  };
+  return {update, shouldRun, reset, getStride: () => stride};
 }

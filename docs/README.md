@@ -10,7 +10,8 @@ La base funcional ya contiene:
 
 - Flutter + Android CameraX/MediaPipe.
 - Visor WebView/standalone con avatar VRM.
-- Pose de cuerpo y dos manos a aproximadamente 30 FPS.
+- Pose de cuerpo desacoplada y manos con objetivo de `>=30 FPS`; FPS real queda
+  pendiente de medición física por dispositivo.
 - Render del avatar a 60 FPS usando solo el último frame vivo.
 - Normalización `MotionFrameV2`: exactamente 32 frames × 152 valores.
 - Validación de geometría, resolución de lado anatómico y asociación uno-a-uno.
@@ -74,7 +75,7 @@ Prueba visual web:
 ./scripts/univoz.sh web
 ```
 
-Después abrir `http://127.0.0.1:8080`, pulsar `Iniciar cámara` y seguir
+Después abrir `http://127.0.0.1:8080/assets/avatar_viewer/index.html?standalone=1`, pulsar `Iniciar cámara` y seguir
 [el protocolo asistido](09-pruebas-camara.md).
 
 ## Regla de compatibilidad

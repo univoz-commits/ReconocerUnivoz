@@ -6,6 +6,8 @@ import {
   createHandAngleFilter,
   createFastFingerAngleFilter,
   createResponsiveRigFilter,
+  createAdaptiveMotionCalibrator,
+  createAdaptivePoseScheduler,
   createThumbCalibration,
   measureThumbPose,
   solveThumbPose,
@@ -122,10 +124,28 @@ test('responsive body filter holds micro-motion but passes intentional movement'
   const held = filter.filter(micro, 33, 1);
   assert.equal(held.frame[0], 0);
   assert.ok(held.diagnostics.deadbandHeld > 0);
+  assert.ok(held.diagnostics.quiet);
+  assert.ok(held.diagnostics.motionScore < .25);
 
-  const intentional = baseFrame(0); intentional[0] = .03;
+  const intentional = baseFrame(0); intentional[0] = .25;
   const moved = filter.filter(intentional, 66, 1);
   assert.ok(moved.frame[0] > .003);
+  assert.ok(moved.diagnostics.intentionalMotion);
+  assert.ok(moved.diagnostics.motionScore >= .8);
+});
+
+test('MAD repairs quiet isolated spike only in render output and records it', () => {
+  const filter = createResponsiveRigFilter();
+  const stable = baseFrame(0);
+  filter.filter(stable, 0, 1);
+  for (const t of [33, 66, 99, 132]) filter.filter(stable, t, 1);
+  const spike = stable.slice();
+  spike[0] = .03;
+  const result = filter.filter(spike, 165, 1);
+  assert.equal(spike[0], .03);
+  assert.equal(result.frame[0], 0);
+  assert.ok(result.diagnostics.madOutliers.includes(0));
+  assert.ok(result.diagnostics.madRepaired.includes(0));
 });
 
 test('responsive body filter rejects regressive timestamps without a jump', () => {
@@ -162,4 +182,44 @@ test('finger lag metric ignores duplicate render samples', () => {
     {timestampMs: 66, input: 1, avatar: .95},
   ]);
   assert.equal(lag, 33);
+});
+
+test('adaptive calibration locks only after quiet warm-up and uses MAD deadband', () => {
+  const calibrator = createAdaptiveMotionCalibrator({
+    warmupMs: 1500, minSamples: 4, deadbands: {body: .003, wrist: .004},
+  });
+  const quiet = baseFrame(0);
+  let state = calibrator.update(quiet, 0, 0);
+  for (let n = 1; n <= 30; n++) {
+    const frame = quiet.slice();
+    frame[0] = n % 2 ? .004 : 0;
+    state = calibrator.update(frame, n * 50, .1);
+  }
+  assert.equal(state.state, 'LOCKED');
+  assert.ok(state.deadbands.body >= .003);
+  assert.ok(state.noise.body >= 0);
+  assert.equal(state.samples.body > 0, true);
+});
+
+test('adaptive calibration never locks warm-up while user moves', () => {
+  const calibrator = createAdaptiveMotionCalibrator({warmupMs: 1500, minSamples: 4});
+  let state = calibrator.update(baseFrame(0), 0, 0);
+  for (let n = 1; n <= 40; n++) {
+    const frame = baseFrame(n * .03);
+    state = calibrator.update(frame, n * 50, .9);
+  }
+  assert.equal(state.state, 'MOTION');
+  assert.equal(state.locked, false);
+});
+
+test('adaptive pose scheduler degrades stride 2 to 3 to 4 then recovers', () => {
+  const scheduler = createAdaptivePoseScheduler();
+  assert.equal(scheduler.update(0, {processP95Ms: 80, inputFps: 25}).stride, 2);
+  assert.equal(scheduler.update(1499, {processP95Ms: 80, inputFps: 25}).stride, 2);
+  assert.equal(scheduler.update(1500, {processP95Ms: 80, inputFps: 25}).stride, 3);
+  assert.equal(scheduler.update(3000, {processP95Ms: 80, inputFps: 25}).stride, 4);
+  assert.equal(scheduler.shouldRun(0, true), true);
+  assert.equal(scheduler.shouldRun(1, true), false);
+  scheduler.update(3001, {processP95Ms: 10, inputFps: 60});
+  assert.equal(scheduler.update(5001, {processP95Ms: 10, inputFps: 60}).stride, 3);
 });

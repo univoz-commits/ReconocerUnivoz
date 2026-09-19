@@ -365,10 +365,15 @@ class _PantallaEspejoState extends State<PantallaEspejo> {
             ),
           ),
         );
-    return Row(mainAxisSize: MainAxisSize.min, children: [
+    final modo = frame?.association['hand_assignment_mode'] ?? 'pose_pending';
+    return Wrap(spacing: 4, runSpacing: 2, children: [
       punto('Cuerpo', frame?.pose != null),
       punto('Izq', frame?.left != null),
       punto('Der', frame?.right != null),
+      Text(
+        'Lados: $modo',
+        style: const TextStyle(color: Colors.white60, fontSize: 11),
+      ),
     ]);
   }
 }

@@ -224,7 +224,7 @@
 
     <!-- ================= DATOS ================= -->
     <div class="hoja escondida" id="hojaDatos">
-      <label class="campo">Frame o secuencia (138 números por frame)</label>
+      <label class="campo">Frame o secuencia (152 números por frame)</label>
       <textarea id="entradaDatos" rows="7" placeholder="Pegar aquí un frame [..] o una secuencia [[..],[..]]"></textarea>
       <div class="botones">
         <button class="bot" id="btnAplicarDatos">Aplicar</button>
@@ -735,7 +735,7 @@ $('btnCopiar').addEventListener('click', async () => {
 // ===========================================================================
 // EXPERIMENTO: brazos resueltos en 3D
 // ===========================================================================
-// El camino normal usa el vector de 138 dimensiones, que es 2D: sign_norm
+// El camino normal usa el vector de 152 dimensiones, que es 3D: sign_norm
 // descarta la Z del cuerpo. Eso hace imposible distinguir una mano adelante
 // de una mano pegada al hombro, y obliga a plegar el codo casi 180 grados
 // para colocar la mano donde la proyeccion dice que esta.
@@ -952,7 +952,7 @@ function normalizarFrame(pose, poseMundo, izq, der) {
 
 let camaraViva = false, cruzarManos = false;
 let detectorPose = null, detectorManos = null, flujo = null;
-// Ultimo vector de 138 dimensiones que se aplico. Es el dato crudo que hay
+// Ultimo vector de 152 dimensiones que se aplico. Es el dato crudo que hay
 // que guardar: los angulos de los huesos son su consecuencia, no su origen.
 let ultimoVector = null;
 // worldLandmarks del mismo instante. Se guarda para poder comparar las dos
@@ -1095,7 +1095,7 @@ function bucleCamara() {
   if (v && !modoManual) {
     aplicarFrame(v);
     // Los brazos en 3D se resuelven DESPUES y pisan lo que hizo aplicarFrame.
-    // Dedos y palma siguen viniendo del vector de 138, que para las manos si
+    // Dedos y palma siguen viniendo del vector de 152, que para las manos si
     // tiene XYZ completo.
     // El modo 3D experimental ya no hace falta: desde sign_norm 2.0.0 el
     // camino normal usa profundidad. Se deja el interruptor porque compara

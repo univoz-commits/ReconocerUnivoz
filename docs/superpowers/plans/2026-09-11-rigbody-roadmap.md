@@ -260,7 +260,7 @@ Expected: PASS, no synthetic codo inversion or overextension.
 ./scripts/univoz.sh web
 ```
 
-Expected: viewer at `http://127.0.0.1:8080`.
+Expected: viewer at `http://127.0.0.1:8080/assets/avatar_viewer/index.html?standalone=1`.
 
 - [ ] **Step 2: Execute camera sequence**
 

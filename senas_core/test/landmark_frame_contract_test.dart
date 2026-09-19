@@ -2,11 +2,6 @@ import 'package:test/test.dart';
 
 import 'package:senas_core/camera_bridge.dart';
 
-List<double> _pose({double visibility = 0.8}) => List<double>.generate(
-      33 * 4,
-      (i) => i % 4 == 3 ? visibility : i / 100,
-    );
-
 List<double> _validPose() {
   final pose = List<double>.filled(33 * 4, 0);
   for (var i = 0; i < 33; i++) pose[i * 4 + 3] = .8;

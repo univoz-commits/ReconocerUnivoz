@@ -7,10 +7,14 @@ void main() {
     final source = File('lib/skeleton_painter.dart').readAsStringSync();
 
     expect(source, contains('bool _puntoEnCuadro'));
-    expect(source, contains('p[0] >= 0 && p[0] <= 1'));
-    expect(source, contains('p[1] >= 0 && p[1] <= 1'));
-    expect(source, contains('if (!_puntoEnCuadro(pa)'));
-    expect(source, contains('if (!_puntoEnCuadro(p)) continue;'));
+    expect(source, contains('p[0].isFinite'));
+    expect(source, contains('p[1].isFinite'));
+    expect(source, contains('p[0] >= 0'));
+    expect(source, contains('p[0] <= 1'));
+    expect(source, contains('p[1] >= 0'));
+    expect(source, contains('p[1] <= 1'));
+    expect(source, contains('!_puntoEnCuadro(pa)'));
+    expect(source, contains('!_puntoEnCuadro(p)'));
   });
 
   test('preview Flutter conserva perspectiva anatomica sin espejo', () {

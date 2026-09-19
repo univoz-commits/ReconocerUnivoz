@@ -142,7 +142,7 @@ Una vez que ves el esqueleto funcionando:
 
 ## Notas técnicas
 
-- Los landmarks crudos se normalizan a 138 dimensiones en Dart
+- Los landmarks crudos se normalizan a 152 dimensiones en Dart
 - El DTW calcula similitud sin entrenar (funciona con ~5 muestras por seña)
 - El preview se pinta con textura nativa (GPU), no con bitmaps (eficiencia)
 - Los landmarks se emiten a ~30 fps (un frame cada ~33 ms)
@@ -152,7 +152,7 @@ Una vez que ves el esqueleto funcionando:
 ```
 lib/
   main.dart              → punto de entrada y permisos
-  lib/sign_norm.dart     → normalización (138 dims)
+  lib/sign_norm.dart     → normalización (152 dims)
   lib/dtw.dart           → clasificador
   flutter/
     camera_bridge.dart   → canales nativo ↔ Dart

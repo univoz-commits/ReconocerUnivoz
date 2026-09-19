@@ -7,6 +7,7 @@
 - Orientación interna: cuaterniones.
 - Dedos: ángulos locales por segmento.
 - Brazos: objetivo de muñeca + plano/polo de codo.
+- Ningún candidato llega al avatar sin pasar `Safety Gate` por unión.
 
 ## IK de dos huesos
 
@@ -55,6 +56,19 @@ q_out = slerp(q_prev, q_new, alpha);
 Usar `nlerp` cuando el ángulo sea pequeño y rendimiento sea más importante.
 Separar `swing` y `twist` en antebrazo/hombro si el rig presenta torsión.
 
+## Safety Gate
+
+`rig_safety.mjs` valida finitud, quaternion, timestamp, `frameId`, padre,
+longitud ósea, límites, velocidad angular, etapa e identidad de mano antes de
+escribir `rotation` o `quaternion`. Códigos incluyen
+`non_finite_transform`, `invalid_quaternion`, `bone_length_drift`,
+`joint_limit_violation`, `quaternion_flip`, `stale_frame`,
+`hand_identity_swap`, `parent_frame_mismatch` y `stage_desync`.
+
+Estado por unión: `VALID → FROZEN → RECOVERING → VALID`. Rechazo conserva la
+última pose local y no congela otras uniones. Recuperación usa tres frames y
+mezcla gradual; prueba sintética confirma que escritor no aplica NaN.
+
 ## Manos
 
 Los cuatro dedos largos siguen `Proximal → Intermediate → Distal`. El pulgar
@@ -67,6 +81,10 @@ Si una cadena de falanges es degenerada:
 - conservar última rotación válida;
 - bajar confianza;
 - esperar una cadena geométricamente útil.
+
+La ruta rápida usa `FingerRenderState` separado de `MotionFrameV2`: forma XYZ
+queda sin segundo suavizado, ángulos MCP/PIP/DIP reciben un único filtro rápido
+y cada entrada se identifica por timestamp para evitar colas viejas.
 
 ## Render y datos
 

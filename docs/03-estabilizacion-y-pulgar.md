@@ -17,18 +17,21 @@ El visor actual ya:
 - valida valores finitos y conexiones geométricas;
 - conserva presencia como estado discreto;
 - conserva mano durante huecos breves;
-- aplica One Euro adaptativo, MAD y rate limit para render;
-- construye marco de mano con puntos de palma;
+- aplica One Euro adaptativo y rate limit para render;
+- detecta y registra MAD; reparación solo ocurre en la salida visual validada,
+  nunca en raw, grabación ni IA;
+- construye marco de mano canónico `PalmFrameV2` con puntos de palma y CMC;
 - calibra neutral del pulgar;
 - calcula falanges por segmentos;
 - usa nomenclatura de pulgar VRM distinta de dedos largos;
 - aplica límites de flexión;
 - mantiene continuidad mediante cuaterniones para brazo y muñeca.
 
-El filtro recibe calidad del frame cuando está disponible. Usa una ventana MAD
-de hasta cinco muestras, umbral `z > 3.5` y sigma mínimo para no marcar cada
-movimiento pequeño como outlier. Raw, grabación y vector IA no pasan por esta
-capa visual.
+El filtro actual recibe calidad global del frame; todavía no usa confianza
+individual por landmark. Usa una ventana MAD de hasta cinco muestras, umbral
+`z > 3.5` y sigma mínimo para no marcar cada movimiento pequeño como outlier.
+Raw, grabación y vector IA no pasan por esta capa visual. La adaptación por
+landmark queda pendiente de medición y no se activa por defecto.
 
 ## Validación robusta implementada
 
@@ -37,7 +40,7 @@ capa visual.
 Rechazar un punto si confianza está debajo del umbral configurado, es no
 finito, sale de rango o rompe una longitud ósea calibrada.
 
-### MAD
+### MAD: detección y reparación visual
 
 Para ventana `N=5` o `7`:
 
@@ -48,8 +51,10 @@ sigma_robust = 1.4826 × MAD
 z = |x_actual - m| / (sigma_robust + ε)
 ```
 
-Marcar outlier cuando `z > 3.5`. Reparar usando el último estado visual antes de
-rate limit y One Euro. Conservar la medición original para diagnóstico.
+Marcar outlier cuando `z > 3.5`. MAD por sí solo no prueba que el movimiento sea
+falso. Reparar solo cuando también existe salto temporal o inconsistencia
+geométrica; usar predicción/mediana en `ValidatedFrame` y conservar raw intacto.
+La salida semántica de captura no se modifica silenciosamente.
 
 ### One Euro
 
@@ -75,7 +80,7 @@ Parámetros iniciales a calibrar con cámara:
 No aplicar One Euro directamente a cuaterniones; usar continuidad de signo y
 SLERP/NLERP.
 
-## Marco de palma
+## Marco de palma `PalmFrameV2`
 
 Con `W=0`, `I=5`, `M=9`, `P=17`, `C=1`:
 
@@ -85,7 +90,10 @@ n = normalize(cross(I-W, P-W))
 r = normalize(cross(n, f))
 ```
 
-Corregir signo de `r` usando dirección `C-W` y lado anatómico. Luego:
+Corregir signo de `r` usando dirección `C-W` y lado anatómico. Exigir
+`dot(C-W, r) > 0` después de corrección. Usar este mismo marco para asociación,
+orientación de muñeca y cálculo del pulgar; no mantener un marco distinto para
+render. Luego:
 
 ```text
 x_palm = f
@@ -93,8 +101,11 @@ y_palm = normalize(cross(n, f))
 z_palm = n
 ```
 
-Rechazar marco degenerado y conservar marco anterior. Suavizar marco antes de
-derivar ángulos.
+Rechazar marco degenerado y conservar marco anterior. Si lado o normal no son
+verificables, conservar último quaternion y emitir `hand_surface_ambiguous`.
+Suavizar marco antes de derivar ángulos. No existe garantía física absoluta con
+RGB monocular; criterio de seguridad es cero inversiones no verificadas
+aplicadas al avatar.
 
 ## Pulgar
 

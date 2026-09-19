@@ -220,6 +220,25 @@
     </div>
   </div>
 
+  <script>
+    // Diagnóstico temprano: imports de módulo ocurren antes de avisar().
+    // Mostrar causa evita pantalla blanca muda en WebView/navegador.
+    (() => {
+      const mostrarFalloArranque = (mensaje) => {
+        const estado = document.getElementById('estado');
+        if (!estado || !mensaje) return;
+        estado.textContent = 'Error de arranque: ' + mensaje;
+        estado.style.display = 'block';
+      };
+      window.addEventListener('error', (evento) => {
+        mostrarFalloArranque(evento.message || evento.error?.message || 'recurso no cargado');
+      }, true);
+      window.addEventListener('unhandledrejection', (evento) => {
+        mostrarFalloArranque(evento.reason?.message || String(evento.reason || 'promesa rechazada'));
+      });
+    })();
+  </script>
+
   <script type="importmap">
   {
     "imports": {
@@ -238,12 +257,15 @@
     import {
       chooseThumbBoneAxis,
       createFastFingerAngleFilter,
+      createAdaptiveMotionCalibrator,
+      createAdaptivePoseScheduler,
       createResponsiveRigFilter,
       createThumbCalibration,
       measureThumbPose,
       measureFingerLag,
       solveThumbPose,
-    } from './rig_math.mjs';
+    } from './rig_math.mjs?rev=20260914-endurecimiento-v1';
+    import { createPerformanceMetrics } from './rig_metrics.mjs';
     import {
       RigAuditBuffer,
       RigDiagnosticBuffer,
@@ -255,11 +277,12 @@
       assignHandsByArmChain,
       classifySourceSkew,
       createHandTrackCoordinator,
-      shouldRunPoseFrame,
-    } from './rig_tracking.mjs?rev=20260913-arm-chain';
+      resolveAnatomicalHandSide,
+    } from './rig_tracking.mjs?rev=20260914-endurecimiento-v1';
 
     const standaloneWeb =
-      new URLSearchParams(window.location.search).get('standalone') === '1';
+      new URLSearchParams(window.location.search).get('standalone') === '1' ||
+      (window.location.protocol.startsWith('http') && !window.SenasChannel);
     const kMediaPipeVersion = '1.0.1';
     const kMediaPipeWasm =
       'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@' +
@@ -294,6 +317,8 @@
       rightHand: false,
       leftHandPoints: 0,
       rightHandPoints: 0,
+      leftSurface: 'unknown',
+      rightSurface: 'unknown',
       handAssignmentMode: 'none',
       smoothing: true,
       quality: 0,
@@ -301,7 +326,43 @@
       staleMs: 0,
       lastValidAt: 0,
       inputFps: 0,
+      captureFps: 0,
+      captureWidth: 0,
+      captureHeight: 0,
       inferenceFps: 0,
+      trackingFps: 0,
+      poseFps: 0,
+      poseMs: 0,
+      handMs: 0,
+      processMs: 0,
+      poseP50Ms: 0,
+      poseP99Ms: 0,
+      handP50Ms: 0,
+      handP99Ms: 0,
+      processP50Ms: 0,
+      processP99Ms: 0,
+      poseP95Ms: 0,
+      handP95Ms: 0,
+      processP95Ms: 0,
+      framesSkipped: 0,
+      poseStride: 2,
+      calibrationState: 'WARMUP',
+      bodyDeadband: .003,
+      wristDeadband: .004,
+      handHolds: 0,
+      handRecoveries: 0,
+      handSwaps: 0,
+      surfaceFlips: 0,
+      invalidTransforms: 0,
+      teleports: 0,
+      renderFps: 0,
+      latencyP50Ms: 0,
+      latencyP95Ms: 0,
+      latencyP99Ms: 0,
+      metricsFrames: 0,
+      motionScore: 0,
+      fingerMotionScore: 0,
+      motionQuiet: true,
       lastTimestampMs: 0,
       lastVectorDim: 0,
       validation: '',
@@ -319,6 +380,9 @@
     // Telemetría numérica efímera. Nunca guarda video ni imágenes y funciona
     // aunque panel visual de diagnóstico esté apagado.
     const rigAudit = new RigAuditBuffer({maxAgeMs: 45_000, maxEvents: 1_800});
+    const webPerformanceMetrics = createPerformanceMetrics([
+      'pose', 'hand', 'process', 'render',
+    ]);
     const rigSafetyGates = new Map();
     const ultimoAuditEmitido = new Map();
     let diagnosticoActivo = false;
@@ -428,13 +492,29 @@
       const capturar = document.getElementById('bCapturarDiag');
       const audit = rigAudit.report();
       if (stats) stats.textContent =
-        `${webCameraState.inferenceFps || 0} FPS · Q ${Math.round(webCameraState.quality * 100)}% · ` +
+        `entrada ${webCameraState.inputFps || 0}/${webCameraState.captureFps || 0} · ` +
+        `track ${webCameraState.trackingFps || 0} · pose ${webCameraState.poseFps || 0} · ` +
+        `render ${webCameraState.renderFps || 0} FPS · ` +
+        `M ${Number(webCameraState.motionScore ?? 0).toFixed(2)} · ` +
+        `dedos ${Number(webCameraState.fingerMotionScore ?? 0).toFixed(2)} · ` +
+        `${webCameraState.motionQuiet ? 'quieto' : 'movimiento'} · ` +
+        `P/H ${webCameraState.poseP95Ms.toFixed(1)}/${webCameraState.handP95Ms.toFixed(1)} ms · ` +
+        `proc p95 ${webCameraState.processP95Ms.toFixed(1)} ms · ` +
+        `L ${webCameraState.latencyP50Ms.toFixed(1)}/` +
+        `${webCameraState.latencyP95Ms.toFixed(1)}/` +
+        `${webCameraState.latencyP99Ms.toFixed(1)} ms · ` +
+        `drop ${webCameraState.framesSkipped || 0} · ` +
+        `Q ${Math.round(webCameraState.quality * 100)}% · ` +
         `delay ${Number(ultimoDiagnosticoFiltro?.delayMs ?? 0).toFixed(1)} ms · ` +
         `deadband ${ultimoDiagnosticoFiltro?.deadbandHeld ?? 0} · ` +
         `fingerLag ${Math.max(
           ultimoDiagnosticoAngulos.left?.fingerLagMs ?? 0,
           ultimoDiagnosticoAngulos.right?.fingerLagMs ?? 0).toFixed(1)} ms · ` +
         `skew ${Number(ultimoSourceMeta?.source_skew_ms ?? 0).toFixed(0)} ms · ` +
+        `cal ${webCameraState.calibrationState} ${Number(webCameraState.bodyDeadband).toFixed(4)}/` +
+        `${Number(webCameraState.wristDeadband).toFixed(4)} · stride ${webCameraState.poseStride} · ` +
+        `surf ${webCameraState.leftSurface}/${webCameraState.rightSurface} · ` +
+        `holds/swaps ${webCameraState.handHolds}/${webCameraState.handSwaps} · ` +
         `${ultimoTrackingWeb?.contact?.active ? 'contacto' : 'separadas'} · ` +
         `health ${Math.round(audit.summary.health_score)}% · ` +
         `${rigDiagnostics.frames.length}/300 · audit ${audit.summary.events_total}`;
@@ -465,8 +545,10 @@
     };
 
     window.obtenerReporteDiagnostico = function () {
-      return JSON.stringify(rigDiagnostics.report(
-        rigCalibrationWire(), rigAudit.report()));
+      const report = rigDiagnostics.report(
+        rigCalibrationWire(), rigAudit.report());
+      report.performance = webPerformanceMetrics.snapshot();
+      return JSON.stringify(report);
     };
 
     function alternarCapturaDiagnostico() {
@@ -520,6 +602,7 @@
             ultimoDiagnosticoAngulos.right?.fingerLagMs ?? 0),
           raw_to_filtered_rms: Number(ultimoDiagnosticoFiltro?.rawToFilteredRms ?? 0),
           mad_outliers: ultimoDiagnosticoFiltro?.madOutliers?.slice() ?? [],
+          mad_repaired: ultimoDiagnosticoFiltro?.madRepaired?.slice() ?? [],
           jump_rejected: [
             ...(ultimoDiagnosticoFiltro?.jumpRejected?.slice() ?? []),
             ...(ultimoDiagnosticoAngulos.left?.jumpRejectedChains ?? []).map(
@@ -547,8 +630,14 @@
     // Escena
     // ---------------------------------------------------------------------
     const lienzo = document.getElementById('lienzo');
-    const renderer = new THREE.WebGLRenderer({ canvas: lienzo, alpha: true, antialias: true });
-    renderer.setPixelRatio(window.devicePixelRatio || 1);
+    // Cap GPU fill cost: camera inference blocks main thread, and high-DPI
+    // antialiasing otherwise starves VRM render cadence on phones/WebViews.
+    const renderPixelRatio = Math.min(window.devicePixelRatio || 1, 1.25);
+    const renderer = new THREE.WebGLRenderer({
+      canvas: lienzo, alpha: true, antialias: false,
+      powerPreference: 'high-performance',
+    });
+    renderer.setPixelRatio(renderPixelRatio);
     renderer.setSize(window.innerWidth, window.innerHeight);
 
     const scene = new THREE.Scene();
@@ -903,16 +992,30 @@
     // vuelta al cargarlo, arriba.
     const avFrente = new THREE.Vector3(0, 0, 1);
 
-    function marcoMano(x, y) {
+    function marcoMano(x, y, cmc = null) {
+      const vectorValido = (v) => v?.isVector3 === true &&
+        typeof v.lengthSq === 'function' &&
+        Number.isFinite(v.x) && Number.isFinite(v.y) &&
+        Number.isFinite(v.z) && v.lengthSq() > 1e-8;
+      // Contract: all frame axes and optional CMC are THREE.Vector3. A raw
+      // landmark array must fail closed instead of throwing in the render loop.
+      if (!vectorValido(x) || !vectorValido(y) ||
+          (cmc != null && !vectorValido(cmc))) return null;
       const ejeX = x.clone();
-      if (ejeX.lengthSq() < 1e-8) return null;
       ejeX.normalize();
       const ejeY = y.clone().addScaledVector(ejeX, -y.dot(ejeX));
-      if (ejeY.lengthSq() < 1e-8) return null;
+      if (!vectorValido(ejeY)) return null;
       ejeY.normalize();
       const ejeZ = new THREE.Vector3().crossVectors(ejeX, ejeY);
-      if (ejeZ.lengthSq() < 1e-8) return null;
+      if (!vectorValido(ejeZ)) return null;
       ejeZ.normalize();
+      // CMC fixes radial-axis sign. Without this check, the same hand seen
+      // from palm/dorsum can produce a quaternion with reversed surface.
+      if (cmc &&
+          cmc.clone().normalize().dot(ejeY) < 0) {
+        ejeY.negate();
+        ejeZ.negate();
+      }
       return { x: ejeX, y: ejeY, z: ejeZ };
     }
 
@@ -1110,6 +1213,8 @@
 
     function reportSafetyAnomaly(result, jointId) {
       if (!result?.code) return;
+      webCameraState.invalidTransforms++;
+      if (result.code === 'teleport_detected') webCameraState.teleports++;
       const side = String(jointId).startsWith('left') ? 'left' :
         String(jointId).startsWith('right') ? 'right' : null;
       errorDiagnostico('safety_gate', result.code, side);
@@ -1590,6 +1695,11 @@
       if (!mano || !referencia || !cal.usarMuneca) return;
       // Presencia=0 conserva ultima orientacion valida durante un gap.
       if (!presente || !puntos || !base) return;
+      const puntoValido = (punto) => Array.isArray(punto) && punto.length >= 3 &&
+        punto.slice(0, 3).every(Number.isFinite);
+      const puntosClave = [0, kIdxIndiceMcp, kIdxMedioMcp, kIdxMeniqueMcp];
+      if (!Array.isArray(puntos) ||
+          !puntosClave.every((indice) => puntoValido(puntos[indice]))) return;
 
       const dedos = vectorManoAAvatar(puntos[kIdxMedioMcp], base);
       const ancho = vectorManoAAvatar([
@@ -1597,7 +1707,8 @@
         puntos[kIdxIndiceMcp][1] - puntos[kIdxMeniqueMcp][1],
         puntos[kIdxIndiceMcp][2] - puntos[kIdxMeniqueMcp][2],
       ], base);
-      const objetivo = marcoMano(dedos, ancho);
+      const cmc = vectorManoAAvatar(puntos[0], base);
+      const objetivo = marcoMano(dedos, ancho, cmc);
       if (!objetivo) return; // landmarks degenerados: conservar ultima pose
 
       const qRest = new THREE.Quaternion().setFromRotationMatrix(
@@ -1667,6 +1778,13 @@
     const responsiveRigFilter = createResponsiveRigFilter({
       deadbands: {body: .003, wrist: .004, shape: 0},
     });
+    const adaptiveMotionCalibrator = createAdaptiveMotionCalibrator({
+      warmupMs: 1500,
+      deadbands: {body: .003, wrist: .004},
+    });
+    const adaptivePoseScheduler = createAdaptivePoseScheduler({
+      minStride: 2, maxStride: 4, processLimitMs: 50,
+    });
     const handAngleFilters = {
       left: Array.from({length: 5}, () => createFastFingerAngleFilter(3)),
       right: Array.from({length: 5}, () => createFastFingerAngleFilter(3)),
@@ -1689,7 +1807,7 @@
       right: {madOutliers: [], jumpRejectedChains: [], delayMs: 0, fingerLagMs: 0},
     };
     let ultimoDiagnosticoFiltro = {
-      madOutliers: [], jumpRejected: [], deadbandHeld: 0,
+      madOutliers: [], madRepaired: [], jumpRejected: [], deadbandHeld: 0,
       delayMs: 0, rawToFilteredRms: 0, timestampRejected: false,
     };
     let ultimoModoSuavizado = webCameraState.smoothing;
@@ -1697,6 +1815,9 @@
       filtroFrameWeb = null;
       filtroTimestampWeb = 0;
       responsiveRigFilter.reset();
+      adaptiveMotionCalibrator.reset();
+      adaptivePoseScheduler.reset();
+      responsiveRigFilter.setDeadbands({body: .003, wrist: .004});
       for (const lado of ['left', 'right']) {
         for (const filtro of handAngleFilters[lado]) filtro.reset();
       }
@@ -1713,8 +1834,11 @@
       }
       resetSafetyGates();
       ultimoDiagnosticoFiltro = {
-        madOutliers: [], jumpRejected: [], deadbandHeld: 0,
+        madOutliers: [], madRepaired: [], jumpRejected: [], deadbandHeld: 0,
         delayMs: 0, rawToFilteredRms: 0, timestampRejected: false,
+        motionScore: 0, motionByGroup: {body: 0, wrist: 0, shape: 0, presence: 0},
+        fingerMotionScore: 0,
+        intentionalMotion: false, quiet: true,
       };
       ultimoModoSuavizado = webCameraState.smoothing;
     }
@@ -1723,9 +1847,6 @@
       if (!Array.isArray(frame) || frame.length !== kFrameDim) return null;
       if (webCameraState.smoothing !== ultimoModoSuavizado) {
         reiniciarFiltroWeb();
-      }
-      if (!webCameraState.smoothing) {
-        return frame.slice();
       }
       const t = Number(timestampMs);
       const confianza = typeof frameVivoQuality !== 'undefined' &&
@@ -1736,6 +1857,16 @@
       filtroFrameWeb = result.frame;
       filtroTimestampWeb = Number.isFinite(t) ? t : 0;
       ultimoDiagnosticoFiltro = result.diagnostics;
+      const calibration = adaptiveMotionCalibrator.update(
+        frame, t, result.diagnostics.motionScore);
+      responsiveRigFilter.setDeadbands(calibration.deadbands);
+      webCameraState.calibrationState = calibration.state;
+      webCameraState.bodyDeadband = calibration.deadbands.body;
+      webCameraState.wristDeadband = calibration.deadbands.wrist;
+      webCameraState.motionScore = Number(result.diagnostics.motionScore ?? 0);
+      webCameraState.fingerMotionScore = Number(
+        result.diagnostics.fingerMotionScore ?? 0);
+      webCameraState.motionQuiet = result.diagnostics.quiet === true;
       if (result.diagnostics.timestampRejected) {
         guardarAudit({
           frame: frameVivoFrameId + 1,
@@ -1744,6 +1875,7 @@
           action: 'hold_last', code: 'stale_frame',
         });
       }
+      if (!webCameraState.smoothing) return frame.slice();
       return result.frame.slice();
     }
 
@@ -1757,6 +1889,8 @@
     let frameVivoTimestampMs = 0;
     let frameVivoQuality = 0;
     let frameVivoFrameId = 0;
+    let frameVivoSourceFrameId = 0;
+    let ultimoSourceFrameRenderizado = 0;
     let frameVivoSourceSkewMs = 0;
     // Reloj local de recepcion. timestampMs puede venir de DateTime de Dart
     // (epoch) o de performance.now() web; no sirve para medir silencio entre
@@ -1904,10 +2038,65 @@
     let camaraUltimoTimestampMs = 0;
     let camaraFpsInicio = 0;
     let camaraFpsFrames = 0;
+    let camaraInputQualityInicio = 0;
+    let camaraInputQualityFrames = 0;
+    let camaraInputQualityDropped = 0;
+    const camaraTimings = {pose: [], hand: [], process: [], render: []};
+    let renderFpsInicio = 0;
+    let renderFpsFrames = 0;
+    let camaraTrackingFpsFrames = 0;
+    let camaraPoseFpsFrames = 0;
     let webCaptureFrameIndex = 0;
     let webPoseCache = null;
     let webGrabacion = [];
     let webUltimaSecuencia = null;
+
+    function percentilWeb(values, percentile = .95) {
+      if (!values.length) return 0;
+      const sorted = values.slice().sort((a, b) => a - b);
+      const index = Math.min(sorted.length - 1,
+        Math.ceil((sorted.length - 1) * percentile));
+      return sorted[index];
+    }
+
+    function registrarTiempoWeb(stage, elapsedMs) {
+      const value = Math.max(0, Number(elapsedMs) || 0);
+      const samples = camaraTimings[stage];
+      samples.push(value);
+      if (samples.length > 60) samples.shift();
+      const current = `${stage}Ms`;
+      const p95 = `${stage}P95Ms`;
+      webCameraState[current] = value;
+      webCameraState[p95] = percentilWeb(samples);
+      webPerformanceMetrics.recordStage(stage, value);
+      actualizarMetricasWeb();
+    }
+
+    function actualizarMetricasWeb() {
+      const report = webPerformanceMetrics.snapshot();
+      for (const stage of ['pose', 'hand', 'process']) {
+        const summary = report.stages[stage];
+        if (!summary) continue;
+        webCameraState[`${stage}P50Ms`] = summary.p50_ms;
+        webCameraState[`${stage}P95Ms`] = summary.p95_ms;
+        webCameraState[`${stage}P99Ms`] = summary.p99_ms;
+      }
+      webCameraState.latencyP50Ms = report.latency_ms.p50_ms;
+      webCameraState.latencyP95Ms = report.latency_ms.p95_ms;
+      webCameraState.latencyP99Ms = report.latency_ms.p99_ms;
+      webCameraState.metricsFrames = report.frames.total;
+    }
+
+    function reiniciarTiemposWeb() {
+      for (const samples of Object.values(camaraTimings)) samples.length = 0;
+      for (const key of [
+        'poseMs', 'handMs', 'processMs',
+        'poseP50Ms', 'poseP95Ms', 'poseP99Ms',
+        'handP50Ms', 'handP95Ms', 'handP99Ms',
+        'processP50Ms', 'processP95Ms', 'processP99Ms',
+      ]) webCameraState[key] = 0;
+      webCameraState.framesSkipped = 0;
+    }
 
     function webCoord(p) {
       if (Array.isArray(p)) {
@@ -2136,7 +2325,8 @@
      * Entrada: resultados crudos de PoseLandmarker y HandLandmarker.
      * Salida: vector MotionFrameV2, exactamente 152 valores o null.
      */
-    function normalizarFrameWeb(pose, poseMundo, left, right) {
+    function normalizarFrameWeb(pose, poseMundo, left, right,
+      renderWrists = null) {
       webCameraState.validation = '';
       if (!Array.isArray(pose) || pose.length < 33 ||
           !Array.isArray(poseMundo) || poseMundo.length < 33) {
@@ -2192,6 +2382,19 @@
         }
         const q = webProyectar(base, poseMundo[poseWrist]);
         if (!q) continue;
+        // Pose wrist can lag one or two inference frames. Render position
+        // follows stabilized hand wrist, while semantic vector keeps raw pose
+        // wrist above. Project image residual into body axes, bounded.
+        const stableWrist = webCoord(renderWrists?.[side]);
+        const poseWristImage = webCoord(pose?.[poseWrist]);
+        if (webFinito(stableWrist) && webFinito(poseWristImage)) {
+          const imageDx = (stableWrist.x - poseWristImage.x) / escalaImg;
+          const imageDy = (stableWrist.y - poseWristImage.y) / escalaImg;
+          const bodyDx = imageDx * cosT + imageDy * sinT;
+          const bodyDy = -imageDx * sinT + imageDy * cosT;
+          q[0] += Math.max(-.75, Math.min(.75, bodyDx));
+          q[1] += Math.max(-.75, Math.min(.75, bodyDy));
+        }
         out[offLoc] = q[0];
         out[offLoc + 1] = q[1];
         out[offLoc + 2] = q[2];
@@ -2260,11 +2463,29 @@
           code: issue?.code ?? (webCameraState.quality < .55 ? 'confidence_low' : 'valid'),
         });
       };
+      const label = (p, text, color) => {
+        const q = pxy(p);
+        if (!q) return;
+        ctx.fillStyle = color;
+        ctx.font = `bold ${Math.max(11, canvas.width / 30)}px sans-serif`;
+        ctx.fillText(text, q[0] + 5, q[1] - 5);
+      };
       const poseEdges = [
         [11, 12], [11, 13], [13, 15], [12, 14], [14, 16],
         [11, 23], [12, 24], [23, 24],
       ];
       for (const [a, b] of poseEdges) line(pose?.[a], pose?.[b], '#44e37a');
+      // Colores I/D trazan cadena anatómica Pose -> mano. No representan
+      // lado visual de pantalla y permiten detectar inversión de orientación.
+      for (const [shoulder, elbow, wrist, color, shoulderLabel, wristLabel] of [
+        [11, 13, 15, '#ff9f43', 'H-I', 'I'],
+        [12, 14, 16, '#62b7ff', 'H-D', 'D'],
+      ]) {
+        line(pose?.[shoulder], pose?.[elbow], color);
+        line(pose?.[elbow], pose?.[wrist], color);
+        label(pose?.[shoulder], shoulderLabel, color);
+        label(pose?.[wrist], wristLabel, color);
+      }
       for (const [hand, etiqueta, color] of [
         [left, 'I', '#ff9f43'], [right, 'D', '#62b7ff'],
       ]) {
@@ -2320,8 +2541,25 @@
         ' · I: ' + (s.leftHand ? 'sí (' + s.leftHandPoints + ')' : 'no') +
         ' · D: ' + (s.rightHand ? 'sí (' + s.rightHandPoints + ')' : 'no') +
         ' · Vector: ' + (s.lastVectorDim || '—') +
-        ' · Q: ' + calidad + ' · ' + s.inferenceFps + ' FPS · válidos ' + s.validFrames +
+        ' · Q: ' + calidad + ' · entrada ' +
+        (s.inputFps ? Number(s.inputFps).toFixed(0) : '—') +
+        ' FPS (cfg ' + (s.captureFps ? Number(s.captureFps).toFixed(0) : '—') +
+        ') · track ' + (s.trackingFps || 0) + ' · pose ' + (s.poseFps || 0) +
+        ' · render ' + s.renderFps + ' FPS · M ' +
+        Number(s.motionScore ?? 0).toFixed(2) +
+        ' · dedos ' + Number(s.fingerMotionScore ?? 0).toFixed(2) +
+        (s.motionQuiet ? ' quieto' : ' movimiento') +
+        ' · P/H ' + Number(s.poseP95Ms ?? 0).toFixed(1) + '/' +
+        Number(s.handP95Ms ?? 0).toFixed(1) + ' ms' +
+        ' · proc ' + Number(s.processP95Ms ?? 0).toFixed(1) + ' ms' +
+        ' · L ' + Number(s.latencyP50Ms ?? 0).toFixed(1) + '/' +
+        Number(s.latencyP95Ms ?? 0).toFixed(1) + '/' +
+        Number(s.latencyP99Ms ?? 0).toFixed(1) + ' ms' +
+        ' · drop ' + (s.framesSkipped || 0) +
+        ' · válidos ' + s.validFrames +
         ' · lados: ' + (s.handAssignmentMode || 'none') +
+        ' · stride ' + (s.poseStride || 2) +
+        ' · calib ' + (s.calibrationState || 'WARMUP') +
         (s.recording ? ' · grabando ' + s.recordedFrames + '/32' :
           s.lastSequenceFrames ? ' · secuencia lista' : '') +
         (s.stale ? ' · sin tracking' : '') +
@@ -2336,68 +2574,22 @@
       return camaraUltimoTimestampMs;
     }
 
-    function ladoPorMunecaPoseWeb(mano, pose) {
-      const wrist = webCoord(mano?.[0]);
-      const leftWrist = webCoord(pose?.[15]);
-      const rightWrist = webCoord(pose?.[16]);
-      const leftShoulder = webCoord(pose?.[11]);
-      const rightShoulder = webCoord(pose?.[12]);
-      if (!webFinito(wrist) || !webFinito(leftWrist) ||
-          !webFinito(rightWrist) || !webFinito(leftShoulder) ||
-          !webFinito(rightShoulder) ||
-          !poseMunecaConfiableWeb(leftWrist) ||
-          !poseMunecaConfiableWeb(rightWrist)) return null;
-
-      const leftDistance = Math.hypot(
-        wrist.x - leftWrist.x, wrist.y - leftWrist.y);
-      const rightDistance = Math.hypot(
-        wrist.x - rightWrist.x, wrist.y - rightWrist.y);
-      const shoulderWidth = Math.hypot(
-        rightShoulder.x - leftShoulder.x,
-        rightShoulder.y - leftShoulder.y);
-      // Pose wrist can jitter several pixels. When both candidates are too
-      // close, return null and let label/x fallback decide without a jump.
-      const margin = Math.max(0.035, shoulderWidth * 0.12);
-      if (Math.abs(leftDistance - rightDistance) < margin) return null;
-      return leftDistance < rightDistance ? 'left' : 'right';
-    }
-
-    function poseMunecaConfiableWeb(punto) {
-      return webFinito(punto) && Number.isFinite(punto.visibility) &&
-        punto.visibility >= 0.35;
-    }
-
-    function ladoFisicoManoWeb(mano, etiqueta, pose) {
-      // Pose landmarks carry anatomical left/right and share image with hand
-      // landmarks. They resolve crossed hands better than x<centre and also
-      // detect a contradictory handedness category before it flips avatar.
-      const ladoPose = ladoPorMunecaPoseWeb(mano, pose);
-      if (ladoPose) return ladoPose;
-
-      const raw = String(etiqueta ?? '').toLowerCase();
-      // Entrada cruda no espejada: MediaPipe entrega Left/Right suponiendo
-      // selfie espejada, asi que etiqueta conocida se invierte. Solo llega
-      // aqui cuando pose no pudo resolver lado por distancia confiable.
-      if (raw.includes('left')) return 'right';
-      if (raw.includes('right')) return 'left';
-
-      // Respaldo sin etiqueta: en imagen cruda, mano fisica izquierda queda
-      // a la derecha del centro de hombros. Margen evita decidir con mano
-      // cruzada justo frente al esternon.
-      const muñeca = webCoord(mano?.[0]);
-      const ls = webCoord(pose?.[11]);
-      const rs = webCoord(pose?.[12]);
-      const centroHombros = (Number.isFinite(ls.x) && Number.isFinite(rs.x))
-        ? (ls.x + rs.x) * 0.5 : NaN;
-      if (!webFinito(muñeca) || !Number.isFinite(centroHombros)) return null;
-      if (muñeca.x > centroHombros + 0.02) return 'left';
-      if (muñeca.x < centroHombros - 0.02) return 'right';
-      return null;
-    }
-
     const webHandTracker = createHandTrackCoordinator();
+    // `hand_assignment_hysteresis` is numeric evidence when continuity holds
+    // identity through a transient contradictory arm-chain label.
     let ultimoTrackingWeb = null;
     let ultimoSourceMeta = null;
+    const wristDisagreementState = {
+      left: {frames: 0, reported: false},
+      right: {frames: 0, reported: false},
+    };
+
+    function reiniciarDesacuerdoMuñeca() {
+      for (const state of Object.values(wristDisagreementState)) {
+        state.frames = 0;
+        state.reported = false;
+      }
+    }
 
     function manosDesdeResultado(resultado, pose, timestampMs = 0) {
       const manos = resultado?.landmarks ?? [];
@@ -2408,7 +2600,7 @@
       const anchoHombros = webFinito(hombroI) && webFinito(hombroD)
         ? Math.max(.05, Math.hypot(
           hombroI.x - hombroD.x, hombroI.y - hombroD.y)) : .4;
-      const candidatosCrudos = manos.slice(0, 2).map((mano, index) => {
+      const candidatosCrudos = manos.map((mano, index) => {
         const categoria = etiquetas?.[index]?.[0] ?? {};
         return {
           landmarks: mano,
@@ -2425,7 +2617,8 @@
         rightWrist: webCoord(pose?.[16]),
         shoulderWidth: anchoHombros,
       });
-      webCameraState.handAssignmentMode = asignacion.mode;
+      webCameraState.handAssignmentMode = asignacion.mode === 'pose_arm_chain' ||
+        asignacion.mode === 'ambiguous' ? asignacion.mode : 'pose_pending';
       if (asignacion.mode === 'ambiguous') {
         webCameraState.validation = 'hand_side_ambiguous';
         diagnosticErrors.push({stage: 'association', code: 'hand_side_ambiguous'});
@@ -2439,27 +2632,41 @@
       }
       const candidatosTrack = candidatosCrudos.map((candidato, index) => {
         const categoria = etiquetas?.[index]?.[0] ?? {};
-        const etiqueta = String(categoria.categoryName ?? '');
-        const mano = candidato.landmarks;
-        const ladoPorCadena = asignacion.sideByIndex[index];
-        const ladoAmbiguo = asignacion.mode === 'ambiguous';
-        const side = ladoAmbiguo ? null :
-          (ladoPorCadena ?? ladoFisicoManoWeb(mano, etiqueta, pose));
-        const completa = webManoUtilizable(mano, side);
+        const anatomia = resolveAnatomicalHandSide(asignacion, index);
+        const completa = webManoUtilizable(candidato.landmarks, anatomia.side);
         return {
-          landmarks: completa ? mano : null,
-          side: completa ? side : null,
-          sideLocked: completa && ladoPorCadena != null,
-          sideAmbiguous: completa && ladoAmbiguo,
+          landmarks: completa ? candidato.landmarks : null,
+          side: completa ? anatomia.side : null,
+          sideLocked: completa && anatomia.sideLocked,
+          sideAmbiguous: completa && anatomia.sideAmbiguous,
           confidence: Number(categoria.score ?? .5),
         };
       });
-      ultimoTrackingWeb = webHandTracker.update(candidatosTrack, {
+      const poseHint = asignacion.mode === 'pose_arm_chain' ? {
         leftWrist: webCoord(pose?.[15]),
         rightWrist: webCoord(pose?.[16]),
         shoulderWidth: anchoHombros,
-      }, t);
+      } : null;
+      ultimoTrackingWeb = webHandTracker.update(candidatosTrack, poseHint, t);
       diagnosticErrors.push(...ultimoTrackingWeb.diagnostics.errors);
+      const trackingErrors = ultimoTrackingWeb.diagnostics.errors;
+      webCameraState.leftSurface = ultimoTrackingWeb.left.surface ?? 'unknown';
+      webCameraState.rightSurface = ultimoTrackingWeb.right.surface ?? 'unknown';
+      webCameraState.handHolds += trackingErrors.filter((error) =>
+        error.code === 'hand_position_held' || error.code === 'hand_surface_flip').length;
+      webCameraState.handRecoveries += ['left', 'right'].filter((side) =>
+        ultimoTrackingWeb[side].recoveryFrames === 2 &&
+        trackingErrors.some((error) => error.side === side &&
+          error.code === 'hand_recovered')).length;
+      webCameraState.handSwaps += trackingErrors.filter((error) =>
+        error.code === 'hand_identity_swap').length;
+      webCameraState.surfaceFlips =
+        (ultimoTrackingWeb.left.surfaceChanges ?? 0) +
+        (ultimoTrackingWeb.right.surfaceChanges ?? 0);
+      const continuityHeld = ultimoTrackingWeb.diagnostics.errors.some((error) =>
+        error.code === 'hand_assignment_hysteresis');
+      const wristFusionMode = classifySourceSkew(
+        Math.abs(t - (webPoseCache?.timestampMs ?? t))).mode;
       for (const [side, poseIndex] of [['left', 15], ['right', 16]]) {
         const track = ultimoTrackingWeb[side];
         const handWrist = webCoord(track.detected?.[0]);
@@ -2468,17 +2675,39 @@
           const residual = Math.hypot(
             handWrist.x - poseWrist.x, handWrist.y - poseWrist.y) /
             anchoHombros;
-          if (residual > .25) {
-            errorDiagnostico('fusion', 'wrist_disagreement', side, 0,
-              'yellow');
+          // A cached pose can be up to 120 ms older than hands. Do not call
+          // that expected temporal skew a broken union; only direct fusion
+          // may raise wrist disagreement.
+          const disagreement = residual > .25 && !continuityHeld &&
+            wristFusionMode === 'direct';
+          const state = wristDisagreementState[side];
+          if (disagreement) {
+            state.frames++;
+            // One crossing or one noisy direct frame is not enough to declare
+            // a broken union. Require persistence, then report once per episode.
+            if (state.frames >= 3 && !state.reported) {
+              state.reported = true;
+              errorDiagnostico('fusion', 'wrist_disagreement', side, 0,
+                'yellow');
+            }
+          } else {
+            state.frames = 0;
+            state.reported = false;
           }
         }
       }
       return {
-        left: ultimoTrackingWeb.left.detected,
-        right: ultimoTrackingWeb.right.detected,
+        // Recognition keeps detector evidence raw. Avatar render consumes
+        // stabilized landmarks below, preventing gates from contaminating
+        // semantic input while still blocking visual jumps.
+        left: ultimoTrackingWeb.left.raw ?? ultimoTrackingWeb.left.detected,
+        right: ultimoTrackingWeb.right.raw ?? ultimoTrackingWeb.right.detected,
         renderLeft: ultimoTrackingWeb.left.renderLandmarks,
         renderRight: ultimoTrackingWeb.right.renderLandmarks,
+        renderWrists: {
+          left: ultimoTrackingWeb.left.renderLandmarks?.[0] ?? null,
+          right: ultimoTrackingWeb.right.renderLandmarks?.[0] ?? null,
+        },
         tracking: ultimoTrackingWeb,
       };
     }
@@ -2504,23 +2733,50 @@
     function procesarCamaraWeb() {
       if (!webCameraState.running) return;
       const video = document.getElementById('camaraVideo');
+      // Diferenciar FPS configurados de FPS reales entregados por la fuente.
+      // Un navegador puede negociar 30 FPS y entregar menos frames al video.
+      const ahoraEntrada = performance.now();
+      const playback = video?.getVideoPlaybackQuality?.();
+      if (playback && Number.isFinite(playback.totalVideoFrames)) {
+        if (!camaraInputQualityInicio) {
+          camaraInputQualityInicio = ahoraEntrada;
+          camaraInputQualityFrames = playback.totalVideoFrames;
+          camaraInputQualityDropped = Number(playback.droppedVideoFrames) || 0;
+        } else if (ahoraEntrada - camaraInputQualityInicio >= 1000) {
+          webCameraState.inputFps = Math.max(0, Math.round(
+            (playback.totalVideoFrames - camaraInputQualityFrames) * 1000 /
+            (ahoraEntrada - camaraInputQualityInicio)));
+          camaraInputQualityInicio = ahoraEntrada;
+          camaraInputQualityFrames = playback.totalVideoFrames;
+        }
+        webCameraState.framesSkipped = Math.max(0,
+          (Number(playback.droppedVideoFrames) || 0) - camaraInputQualityDropped);
+      }
       if (video && video.readyState >= 2 &&
           video.currentTime !== camaraUltimoVideoTime &&
           !webCameraState.processing) {
         camaraUltimoVideoTime = video.currentTime;
         webCameraState.processing = true;
+        const processStartedAt = performance.now();
         const timestampMs = siguienteTimestampWeb();
+        const sourceFrameId = webCaptureFrameIndex + 1;
         diagnosticPointIssues = [];
         diagnosticErrors = [];
         try {
           // Hands run every accepted frame; pose runs every second frame after
           // first lock. Fast finger response gets priority without losing
           // shoulder-chain identity.
-          const ejecutarPose = shouldRunPoseFrame(
+          const ejecutarPose = adaptivePoseScheduler.shouldRun(
             webCaptureFrameIndex, !!webPoseCache);
+          const poseStartedAt = performance.now();
           const poseResult = ejecutarPose
             ? poseLandmarkerWeb.detectForVideo(video, timestampMs) : null;
+          if (ejecutarPose) {
+            registrarTiempoWeb('pose', performance.now() - poseStartedAt);
+          }
+          const handStartedAt = performance.now();
           const handResult = handLandmarkerWeb.detectForVideo(video, timestampMs);
+          registrarTiempoWeb('hand', performance.now() - handStartedAt);
           if (poseResult) {
             webPoseCache = {
               pose: poseResult?.landmarks?.[0] ?? null,
@@ -2528,7 +2784,7 @@
               timestampMs,
             };
           }
-          webCaptureFrameIndex++;
+          webCaptureFrameIndex = sourceFrameId;
           const pose = webPoseCache?.pose ?? null;
           const poseMundo = webPoseCache?.poseMundo ?? null;
           const poseTimestampMs = webPoseCache?.timestampMs ?? timestampMs;
@@ -2538,7 +2794,18 @@
           const vectorRender = normalizarFrameWeb(
             pose, poseMundo,
             manos.renderLeft ?? manos.left,
-            manos.renderRight ?? manos.right);
+            manos.renderRight ?? manos.right,
+            manos.renderWrists);
+          const trackingAccepted = !!manos.left || !!manos.right;
+          if (trackingAccepted) camaraTrackingFpsFrames++;
+          if (ejecutarPose && poseResult) camaraPoseFpsFrames++;
+          webPerformanceMetrics.recordFrame({
+            timestampMs,
+            sourceFrameId,
+            capturedAtMs: timestampMs,
+            valid: Array.isArray(vector),
+          });
+          actualizarMetricasWeb();
           ultimoSourceMeta = {
             pose_t: poseTimestampMs,
             hands_t: timestampMs,
@@ -2574,6 +2841,7 @@
             webCameraState.staleMs = 0;
             frameVivoQuality = calidad;
             frameVivoFrameId++;
+            frameVivoSourceFrameId = sourceFrameId;
             frameVivoSourceSkewMs = Math.abs(timestampMs - poseTimestampMs);
             frameVivo = suavizarFrameWeb(vectorRender ?? vector, timestampMs);
             frameVivoTimestampMs = timestampMs;
@@ -2606,16 +2874,27 @@
           camaraFpsFrames++;
           if (ahora - camaraFpsInicio >= 1000) {
             webCameraState.inferenceFps = camaraFpsFrames;
+            webCameraState.trackingFps = camaraTrackingFpsFrames;
+            webCameraState.poseFps = camaraPoseFpsFrames;
             camaraFpsFrames = 0;
+            camaraTrackingFpsFrames = 0;
+            camaraPoseFpsFrames = 0;
             camaraFpsInicio = ahora;
           }
           if (webCameraState.frames % 5 === 0) pintarEstadoCamaraWeb();
           if (diagnosticoActivo && webCameraState.frames % 3 === 0) pintarDiagnostico();
+          registrarTiempoWeb('process', performance.now() - processStartedAt);
+          webCameraState.poseStride = adaptivePoseScheduler.update(
+            performance.now(), {
+              processP95Ms: webCameraState.processP95Ms,
+              inputFps: webCameraState.inputFps,
+            }).stride;
         } catch (e) {
           const error = String(e?.message ?? e);
           webCameraState.running = false;
           void liberarCamaraWeb().catch(() => {}).finally(() => {
             webCameraState.error = error;
+            avisar('Error procesando cámara: ' + error);
             pintarEstadoCamaraWeb();
           });
         } finally {
@@ -2737,6 +3016,7 @@
       })().catch((error) => {
         webCameraState.detectorsReady = false;
         webCameraState.detectorError = String(error?.message ?? error);
+        avisar('Detectores MediaPipe: ' + webCameraState.detectorError);
         throw error;
       }).finally(() => {
         detectorWarmupWeb = null;
@@ -2789,10 +3069,12 @@
         audio: false,
         video: {
           facingMode: 'user',
-          // 480x360 keeps hand landmarks readable while leaving enough CPU
-          // for accepted frames to approach 30 FPS on mid-range devices.
-          width: { ideal: 480, max: 480 },
-          height: { ideal: 360, max: 360 },
+          frameRate: { ideal: 30, max: 60 },
+          // 360x270 keeps all 21 points usable; controlled A/B at 320x240
+          // increased detector p95 on this host. Real device must still
+          // validate 30 FPS target.
+          width: { ideal: 360, max: 360 },
+          height: { ideal: 270, max: 270 },
         },
       });
       let cancelado = false;
@@ -2843,8 +3125,27 @@
         camaraUltimoTimestampMs = 0;
         webCaptureFrameIndex = 0;
         webPoseCache = null;
+        webHandTracker.reset();
+        reiniciarFiltroWeb();
         camaraFpsInicio = 0;
         camaraFpsFrames = 0;
+        camaraTrackingFpsFrames = 0;
+        camaraPoseFpsFrames = 0;
+        camaraInputQualityInicio = 0;
+        camaraInputQualityFrames = 0;
+        camaraInputQualityDropped = 0;
+        reiniciarDesacuerdoMuñeca();
+        reiniciarTiemposWeb();
+        webPerformanceMetrics.reset();
+        actualizarMetricasWeb();
+        renderFpsInicio = 0;
+        renderFpsFrames = 0;
+        frameVivoSourceFrameId = 0;
+        ultimoSourceFrameRenderizado = 0;
+        const videoSettings = camaraStream.getVideoTracks?.()[0]?.getSettings?.() ?? {};
+        webCameraState.captureFps = Number(videoSettings.frameRate) || 0;
+        webCameraState.captureWidth = Number(videoSettings.width) || 0;
+        webCameraState.captureHeight = Number(videoSettings.height) || 0;
         webCameraState.loading = false;
         webCameraState.running = true;
         webCameraState.frames = 0;
@@ -2854,7 +3155,26 @@
         webCameraState.stale = false;
         webCameraState.staleMs = 0;
         webCameraState.lastValidAt = 0;
+        webCameraState.inputFps = 0;
         webCameraState.inferenceFps = 0;
+        webCameraState.trackingFps = 0;
+        webCameraState.poseFps = 0;
+        webCameraState.renderFps = 0;
+        webCameraState.poseStride = adaptivePoseScheduler.getStride();
+        webCameraState.calibrationState = 'WARMUP';
+        webCameraState.bodyDeadband = .003;
+        webCameraState.wristDeadband = .004;
+        webCameraState.leftSurface = 'unknown';
+        webCameraState.rightSurface = 'unknown';
+        webCameraState.handHolds = 0;
+        webCameraState.handRecoveries = 0;
+        webCameraState.handSwaps = 0;
+        webCameraState.surfaceFlips = 0;
+        webCameraState.invalidTransforms = 0;
+        webCameraState.teleports = 0;
+        webCameraState.motionScore = 0;
+        webCameraState.fingerMotionScore = 0;
+        webCameraState.motionQuiet = true;
         pintarEstadoCamaraWeb();
         camaraLoopId = requestAnimationFrame(procesarCamaraWeb);
         return true;
@@ -2878,6 +3198,8 @@
       webCameraState.leftHandPoints = 0;
       webCameraState.rightHandPoints = 0;
       webCameraState.lastVectorDim = 0;
+      frameVivoSourceFrameId = 0;
+      ultimoSourceFrameRenderizado = 0;
       webCameraState.frames = 0;
       webCameraState.validFrames = 0;
       webCameraState.invalidFrames = 0;
@@ -2886,6 +3208,33 @@
       webCameraState.staleMs = 0;
       webCameraState.lastValidAt = 0;
       webCameraState.inferenceFps = 0;
+      webCameraState.trackingFps = 0;
+      webCameraState.poseFps = 0;
+      webCameraState.captureFps = 0;
+      webCameraState.captureWidth = 0;
+      webCameraState.captureHeight = 0;
+      reiniciarDesacuerdoMuñeca();
+      reiniciarTiemposWeb();
+      webPerformanceMetrics.reset();
+      actualizarMetricasWeb();
+      webCameraState.renderFps = 0;
+      webHandTracker.reset();
+      reiniciarFiltroWeb();
+      webCameraState.poseStride = adaptivePoseScheduler.getStride();
+      webCameraState.calibrationState = 'WARMUP';
+      webCameraState.bodyDeadband = .003;
+      webCameraState.wristDeadband = .004;
+      webCameraState.leftSurface = 'unknown';
+      webCameraState.rightSurface = 'unknown';
+      webCameraState.handHolds = 0;
+      webCameraState.handRecoveries = 0;
+      webCameraState.handSwaps = 0;
+      webCameraState.surfaceFlips = 0;
+      webCameraState.invalidTransforms = 0;
+      webCameraState.teleports = 0;
+      webCameraState.motionScore = 0;
+      webCameraState.fingerMotionScore = 0;
+      webCameraState.motionQuiet = true;
       webCameraState.lastTimestampMs = 0;
       webCameraState.handAssignmentMode = 'none';
       pintarEstadoCamaraWeb();
@@ -3481,6 +3830,18 @@
             timestampMs: frameVivoTimestampMs,
             sourceSkewMs: frameVivoSourceSkewMs,
           });
+          if (standaloneWeb && frameVivoSourceFrameId > 0 &&
+              frameVivoSourceFrameId !== ultimoSourceFrameRenderizado) {
+            webPerformanceMetrics.recordFrame({
+              timestampMs: frameVivoTimestampMs,
+              sourceFrameId: frameVivoSourceFrameId,
+              capturedAtMs: frameVivoTimestampMs,
+              renderedAtMs: t,
+              valid: true,
+            });
+            ultimoSourceFrameRenderizado = frameVivoSourceFrameId;
+            actualizarMetricasWeb();
+          }
         }
       }
 
@@ -3494,8 +3855,19 @@
       // del codigo -- posarReposo, el IK y el parpadeo se escriben pero
       // nunca se ven. Va despues de aplicarFrame/moverExpresionBasica y
       // antes de render.
+      const renderStartedAt = performance.now();
       if (vrm) vrm.update(dt / 1000);
       renderer.render(scene, camera);
+      if (standaloneWeb) {
+        registrarTiempoWeb('render', performance.now() - renderStartedAt);
+      }
+      if (!renderFpsInicio) renderFpsInicio = t;
+      renderFpsFrames++;
+      if (t - renderFpsInicio >= 1000) {
+        webCameraState.renderFps = renderFpsFrames;
+        renderFpsFrames = 0;
+        renderFpsInicio = t;
+      }
     }
     requestAnimationFrame(animar);
   </script>

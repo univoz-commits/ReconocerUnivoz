@@ -14,11 +14,11 @@ void main() {
       'android/app/src/main/kotlin/com/univoz/senas/LandmarkPlugin.kt',
     ).readAsStringSync();
 
-    expect(source, contains('private fun ladoPorMunecaPose('));
     expect(source, contains('val normal = costos[0].first + costos[1].second'));
-    expect(source, contains('val cruzada = costos[0].second + costos[1].first'));
+    expect(
+        source, contains('val cruzada = costos[0].second + costos[1].first'));
     expect(source, contains('abs(normal - cruzada) >= margen'));
-    expect(source, contains('poseTieneMunecas(poseParaLados)'));
+    expect(source, contains('poseCadenaDisponible && it.size >= 33 * 4'));
     expect(source, contains('MIN_POSE_WRIST_VISIBILITY'));
     expect(source, contains('pose[i * 4 + 3] >= MIN_POSE_WRIST_VISIBILITY'));
     expect(source, contains('poseTieneCadenaBrazo'));
@@ -33,9 +33,10 @@ void main() {
     expect(coordinator, contains('sideAmbiguous'));
     expect(coordinator, contains('hand_side_ambiguous'));
     expect(plugin, contains('rotationDegrees'));
-    expect(source, isNot(contains(
-      'when (ladoFisicoMano(etiqueta, lm[0].x()))',
-    )));
+    expect(source, contains('ultimoAssignmentMode = when'));
+    expect(source, contains('"pose_pending"'));
+    expect(source, isNot(contains('private fun ladoFisicoMano(')));
+    expect(source, isNot(contains('private fun ladoPorMunecaPose(')));
   });
 
   test('CameraX keeps hand cadence and halves pose workload', () {

@@ -181,5 +181,5 @@ LEFT JOIN sign_samples ss ON ss.sign_id = s.id
 GROUP BY s.id, s.gloss;
 
 INSERT INTO norm_versions (version, frame_dim, t_frames, notas)
-VALUES ('1.0.0', 138, 32, 'origen en punto medio de hombros, escala por ancho de hombros, correccion de inclinacion')
+VALUES ('2.0.0', 152, 32, 'pose mundial 3D, manos relativas a muñeca, float16 little-endian')
 ON CONFLICT (version) DO NOTHING;

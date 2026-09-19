@@ -132,6 +132,7 @@ def main():
                 frames_invalidos=0,
                 visibilidad_min=None,
                 quality_score=None,
+                checksum_sha256=m.get("checksum_sha256"),
                 signer_id=signer_uuid(signer) if signer else None,
                 mano_dominante=args.mano_dominante,
                 estado=estado,

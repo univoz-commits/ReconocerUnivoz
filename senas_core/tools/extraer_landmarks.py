@@ -5,7 +5,7 @@ pose_landmarker_lite.task) pero en RunningMode.VIDEO en vez de LIVE_STREAM:
 aca no hay camara en vivo, así que se puede pedir el resultado de forma
 sincronica, frame por frame, sin canales ni callbacks.
 
-La salida (lista de (pose, left, right) por frame) tiene EXACTAMENTE el
+La salida (lista de (pose, pose_mundo, left, right) por frame) tiene EXACTAMENTE el
 mismo formato que espera sign_norm.normalize_sequence -- es el mismo
 "contrato" que ya usa el golden test entre Dart y Python.
 """
@@ -21,6 +21,10 @@ def _punto_pose(p):
 
 
 def _punto_mano(p):
+    return [p.x, p.y, p.z]
+
+
+def _punto_pose_mundo(p):
     return [p.x, p.y, p.z]
 
 
@@ -70,7 +74,7 @@ class ExtractorLandmarks:
     def extraer(self, video_path):
         """Devuelve (raw_frames, fps, n_frames).
 
-        raw_frames: lista de (pose, left, right) por cada frame leido del
+        raw_frames: lista de (pose, pose_mundo, left, right) por cada frame leido del
         video, en el mismo formato que sign_norm.normalize_sequence espera
         (pose: 33 x [x,y,z,vis] o None; left/right: 21 x [x,y,z] o None).
         """
@@ -109,6 +113,11 @@ class ExtractorLandmarks:
             if pose_res.pose_landmarks:
                 pose = [_punto_pose(p) for p in pose_res.pose_landmarks[0]]
 
+            pose_mundo = None
+            if pose_res.pose_world_landmarks:
+                pose_mundo = [_punto_pose_mundo(p)
+                              for p in pose_res.pose_world_landmarks[0]]
+
             left = right = None
             for lm, handed in zip(hand_res.hand_landmarks, hand_res.handedness):
                 etiqueta = handed[0].category_name if handed else None
@@ -118,7 +127,7 @@ class ExtractorLandmarks:
                 else:
                     right = pts
 
-            raw_frames.append((pose, left, right))
+            raw_frames.append((pose, pose_mundo, left, right))
             idx += 1
 
         cap.release()

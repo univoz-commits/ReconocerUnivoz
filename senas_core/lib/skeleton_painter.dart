@@ -21,7 +21,8 @@ class SkeletonPainter extends CustomPainter {
   static const double _minVisibility = 0.5;
 
   static const _colorCuerpo = Color(0xFF4A90E2);
-  static const _colorMano = Color(0xFFFF6B6B);
+  static const _colorIzquierda = Color(0xFFFFA726);
+  static const _colorDerecha = Color(0xFF42A5F5);
 
   SkeletonPainter({this.frame});
 
@@ -36,10 +37,12 @@ class SkeletonPainter extends CustomPainter {
 
     // Pinta las manos
     if (frame!.left != null) {
-      _paintMano(canvas, frame!.left!, size, esIzq: true);
+      _paintMano(canvas, frame!.left!, size,
+          color: _colorIzquierda, etiqueta: 'I');
     }
     if (frame!.right != null) {
-      _paintMano(canvas, frame!.right!, size, esIzq: false);
+      _paintMano(canvas, frame!.right!, size,
+          color: _colorDerecha, etiqueta: 'D');
     }
   }
 
@@ -102,21 +105,81 @@ class SkeletonPainter extends CustomPainter {
       if (!_puntoEnCuadro(p)) continue;
       canvas.drawCircle(_punto(p, size), 3, puntoPaint);
     }
+
+    // La cadena Pose -> mano queda identificable incluso cuando la imagen
+    // frontal se interpreta al revés. I/D son lados anatómicos de la persona.
+    _paintLado(canvas, pose, size, 11, 13, 15, _colorIzquierda, 'H-I', 'I');
+    _paintLado(canvas, pose, size, 12, 14, 16, _colorDerecha, 'H-D', 'D');
+  }
+
+  void _paintLado(
+      Canvas canvas,
+      List<List<double>> pose,
+      Size size,
+      int hombro,
+      int codo,
+      int muneca,
+      Color color,
+      String etiquetaHombro,
+      String etiquetaMuneca) {
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = 3
+      ..strokeCap = StrokeCap.round;
+    void line(int a, int b) {
+      if (a >= pose.length || b >= pose.length) return;
+      final pa = pose[a], pb = pose[b];
+      if (pa.length < 4 ||
+          pb.length < 4 ||
+          pa[3] < _minVisibility ||
+          pb[3] < _minVisibility ||
+          !_puntoEnCuadro(pa) ||
+          !_puntoEnCuadro(pb)) return;
+      canvas.drawLine(_punto(pa, size), _punto(pb, size), paint);
+    }
+
+    line(hombro, codo);
+    line(codo, muneca);
+    if (hombro < pose.length) {
+      _paintEtiqueta(canvas, pose[hombro], size, etiquetaHombro, color);
+    }
+    if (muneca < pose.length) {
+      _paintEtiqueta(canvas, pose[muneca], size, etiquetaMuneca, color);
+    }
+  }
+
+  void _paintEtiqueta(
+      Canvas canvas, List<double> p, Size size, String texto, Color color) {
+    if (!_puntoEnCuadro(p)) return;
+    final painter = TextPainter(
+      text: TextSpan(
+        text: texto,
+        style: TextStyle(
+          color: color,
+          fontSize: 11,
+          fontWeight: FontWeight.bold,
+          backgroundColor: Colors.black54,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    painter.paint(canvas, _punto(p, size) + Offset(4, -painter.height - 2));
   }
 
   void _paintMano(
     Canvas canvas,
     List<List<double>> mano,
     Size size, {
-    required bool esIzq,
+    required Color color,
+    required String etiqueta,
   }) {
     final paint = Paint()
-      ..color = _colorMano
+      ..color = color
       ..strokeWidth = 1.5
       ..strokeCap = StrokeCap.round;
 
     final puntoPaint = Paint()
-      ..color = _colorMano
+      ..color = color
       ..style = PaintingStyle.fill;
 
     // MediaPipe Hand: conexiones entre dedos (ver el modelo oficial)
@@ -165,12 +228,19 @@ class SkeletonPainter extends CustomPainter {
       if (!_puntoEnCuadro(p)) continue;
       canvas.drawCircle(_punto3d(p, size), 2, puntoPaint);
     }
+    if (mano.isNotEmpty)
+      _paintEtiqueta(canvas, mano.first, size, etiqueta, color);
   }
 
   bool _puntoEnCuadro(List<double> p) =>
       p.length >= 3 &&
-      p[0].isFinite && p[1].isFinite && p[2].isFinite &&
-      p[0] >= 0 && p[0] <= 1 && p[1] >= 0 && p[1] <= 1;
+      p[0].isFinite &&
+      p[1].isFinite &&
+      p[2].isFinite &&
+      p[0] >= 0 &&
+      p[0] <= 1 &&
+      p[1] >= 0 &&
+      p[1] <= 1;
 
   Offset _punto(List<double> p, Size size) {
     return Offset(p[0] * size.width, p[1] * size.height);
