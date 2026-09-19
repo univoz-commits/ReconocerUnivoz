@@ -2,6 +2,9 @@ package com.univoz.senas
 
 import android.content.Context
 import android.graphics.Bitmap
+import kotlin.math.abs
+import kotlin.math.hypot
+import kotlin.math.max
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.core.Delegate
@@ -18,10 +21,11 @@ import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarkerResult
  * asincronos que llegan en orden impredecible. Hay DOS salidas distintas
  * a proposito:
  *
- * - [onFrame]: solo dispara cuando pose y manos coincidieron en el mismo
- *   timestamp exacto (osea, cuando ademas se mandaron juntas -- ver
- *   [analizarPose]/[analizarManos]). Usar para guardar muestras o
- *   alimentar el clasificador (DtwClassifier).
+ * - [onFrame]: solo dispara cuando pose y manos disponibles pertenecen a
+ *   instantes compatibles (ventana maxima de 120 ms). Las tareas pueden
+ *   terminar con latencias distintas; exigir timestamp exacto dejaria el
+ *   canal de grabacion vacio en dispositivos lentos. Usar para guardar
+ *   muestras o alimentar el clasificador (DtwClassifier).
  *
  * - [onPreview]: dispara cada vez que CUALQUIERA de los dos modelos
  *   termina, combinando con el ultimo dato conocido del otro. Es para
@@ -62,19 +66,14 @@ class LandmarkEngine(
         val poseMundo: DoubleArray?,
         val left: DoubleArray?,
         val right: DoubleArray?,
+        val renderLeft: DoubleArray?,
+        val renderRight: DoubleArray?,
+        val poseTimestampMs: Long?,
+        val handsTimestampMs: Long?,
+        val sourceSkewMs: Long?,
+        val association: Map<String, Any?>,
+        val errors: List<Map<String, String>>,
     )
-
-    private class Pendiente {
-        var pose: DoubleArray? = null
-        var poseMundo: DoubleArray? = null
-        var left: DoubleArray? = null
-        var right: DoubleArray? = null
-        var tienePose = false
-        var tieneManos = false
-    }
-
-    private val pendientes = LinkedHashMap<Long, Pendiente>()
-    private val maxPendientes = 8
 
     // Ultimo dato conocido de cada mitad, para armar el preview sin esperar
     // a que coincidan. Con lock propio porque pose y manos llegan de hilos
@@ -82,8 +81,28 @@ class LandmarkEngine(
     private val ultimoLock = Any()
     private var ultimaPose: DoubleArray? = null
     private var ultimaPoseMundo: DoubleArray? = null
+    private var ultimoTimestampPose = Long.MIN_VALUE
     private var ultimaIzq: DoubleArray? = null
     private var ultimaDer: DoubleArray? = null
+    private var ultimoTimestampManos = Long.MIN_VALUE
+    private var manosConocidas = false
+    private val handTracker = HandTrackCoordinator()
+    private var ultimoTracking: HandTrackCoordinator.Result? = null
+    private var ultimoAssignmentMode = "pose_pending"
+
+    private data class ManoCandidata(
+        val puntos: DoubleArray,
+        val confianza: Double,
+        val muñecaX: Double,
+        val muñecaY: Double,
+    )
+
+    // A 30 FPS permite un desfase de hasta 3-4 capturas entre tasks, pero no
+    // mezcla posturas separadas por una pausa real del tracking.
+    private val ventanaFusionMs = 120L
+    private companion object {
+        const val MIN_POSE_WRIST_VISIBILITY = 0.35
+    }
 
     // Compuertas de backpresion INDEPENDIENTES: cada modelo se libera con
     // su propio resultado, no con el del otro. Asi las manos no esperan al
@@ -146,15 +165,6 @@ class LandmarkEngine(
         poseEnVuelo && (System.nanoTime() - poseDesdeNs < timeoutNs)
     }
 
-    private fun pendienteDe(t: Long): Pendiente = synchronized(pendientes) {
-        val p = pendientes.getOrPut(t) { Pendiente() }
-        while (pendientes.size > maxPendientes) {
-            val vieja = pendientes.keys.first()
-            pendientes.remove(vieja)
-        }
-        p
-    }
-
     /** [timestampMs] estrictamente creciente. Devuelve false si ya hay manos en vuelo. */
     fun analizarManos(bitmap: Bitmap, timestampMs: Long): Boolean {
         synchronized(manosLock) {
@@ -163,7 +173,6 @@ class LandmarkEngine(
             manosEnVuelo = true
             manosDesdeNs = ahora
         }
-        pendienteDe(timestampMs)
         val mpImage = BitmapImageBuilder(bitmap).build()
         handLandmarker.detectAsync(mpImage, timestampMs)
         return true
@@ -177,10 +186,74 @@ class LandmarkEngine(
             poseEnVuelo = true
             poseDesdeNs = ahora
         }
-        pendienteDe(timestampMs)
         val mpImage = BitmapImageBuilder(bitmap).build()
         poseLandmarker.detectAsync(mpImage, timestampMs)
         return true
+    }
+
+    private fun crearFrame(
+        timestampMs: Long,
+        pose: DoubleArray?,
+        poseMundo: DoubleArray?,
+        left: DoubleArray?,
+        right: DoubleArray?,
+        renderLeft: DoubleArray?,
+        renderRight: DoubleArray?,
+        poseTimestampMs: Long?,
+        handsTimestampMs: Long?,
+        tracking: HandTrackCoordinator.Result?,
+        extraErrors: List<Map<String, String>> = emptyList(),
+    ): FrameResult {
+        val skew = if (poseTimestampMs != null && handsTimestampMs != null)
+            abs(poseTimestampMs - handsTimestampMs) else null
+        val errors = mutableListOf<Map<String, String>>()
+        tracking?.errors?.let(errors::addAll)
+        errors.addAll(extraErrors)
+        if (skew != null && skew > 50) {
+            errors += mapOf("stage" to "fusion", "code" to "source_skew")
+        }
+        if (pose != null && pose.size >= 33 * 4) {
+            val shoulderWidth = max(.05, distanciaPose(pose, 11, 12))
+            listOf("left" to (left to 15), "right" to (right to 16)).forEach {
+                (side, handAndIndex) ->
+                val hand = handAndIndex.first
+                val poseIndex = handAndIndex.second
+                if (hand != null && hand.size >= 3) {
+                    val residual = hypot(
+                        hand[0] - pose[poseIndex * 4],
+                        hand[1] - pose[poseIndex * 4 + 1],
+                    ) / shoulderWidth
+                    if (residual > .25) errors += mapOf(
+                        "stage" to "fusion",
+                        "code" to "wrist_disagreement",
+                        "side" to side,
+                    )
+                }
+            }
+        }
+        val association = if (tracking == null) emptyMap() else mapOf(
+            "left_state" to tracking.left.state,
+            "right_state" to tracking.right.state,
+            "left_cost" to tracking.costs["left"],
+            "right_cost" to tracking.costs["right"],
+            "hand_assignment_mode" to ultimoAssignmentMode,
+            "contact" to tracking.contact,
+            "contact_wrist_distance" to tracking.contactWristDistance,
+        )
+        return FrameResult(
+            timestampMs,
+            pose,
+            poseMundo,
+            left,
+            right,
+            renderLeft,
+            renderRight,
+            poseTimestampMs,
+            handsTimestampMs,
+            skew,
+            association,
+            errors,
+        )
     }
 
     private fun onPose(result: PoseLandmarkerResult) {
@@ -210,28 +283,75 @@ class LandmarkEngine(
             }
         }
 
-        completar(t) { it.pose = arr; it.poseMundo = arrMundo; it.tienePose = true }
-
-        val (izq, der) = synchronized(ultimoLock) {
+        var fusionado: FrameResult? = null
+        val preview = synchronized(ultimoLock) {
             ultimaPose = arr
             ultimaPoseMundo = arrMundo
-            ultimaIzq to ultimaDer
+            ultimoTimestampPose = t
+            val shoulderWidth = if (arr != null && arr.size >= 33 * 4)
+                max(.05, distanciaPose(arr, 11, 12)) else .4
+            val render = if (manosConocidas) {
+                handTracker.renderAt(t, shoulderWidth)
+            } else null
+            if (manosConocidas && abs(t - ultimoTimestampManos) <= ventanaFusionMs) {
+                fusionado = crearFrame(
+                    maxOf(t, ultimoTimestampManos),
+                    arr,
+                    arrMundo,
+                    ultimaIzq,
+                    ultimaDer,
+                    render?.left?.render,
+                    render?.right?.render,
+                    t,
+                    ultimoTimestampManos,
+                    render ?: ultimoTracking,
+                )
+            }
+            crearFrame(
+                t,
+                arr,
+                arrMundo,
+                ultimaIzq,
+                ultimaDer,
+                render?.left?.render,
+                render?.right?.render,
+                t,
+                ultimoTimestampManos.takeIf { manosConocidas },
+                render ?: ultimoTracking,
+            )
         }
-        onPreview(FrameResult(t, arr, arrMundo, izq, der))
+        onPreview(preview)
+        fusionado?.let(onFrame)
     }
 
     private fun onManos(result: HandLandmarkerResult) {
         synchronized(manosLock) { manosEnVuelo = false }
 
         val t = result.timestampMs()
-        var izq: DoubleArray? = null
-        var der: DoubleArray? = null
+        val poseParaLados = synchronized(ultimoLock) {
+            if (ultimoTimestampPose != Long.MIN_VALUE &&
+                abs(t - ultimoTimestampPose) <= ventanaFusionMs
+            ) {
+                ultimaPose
+            } else {
+                null
+            }
+        }
 
         val manos = result.landmarks()
-        val lados = result.handednesses()
+        val categorias = result.handednesses()
+        val candidatas = mutableListOf<ManoCandidata>()
+        val erroresEntrada = mutableListOf<Map<String, String>>()
         for (i in manos.indices) {
             val lm = manos[i]
-            if (lm.size < 21) continue
+            if (lm.size != 21) {
+                erroresEntrada += mapOf(
+                    "stage" to "capture",
+                    "code" to "hand_landmarks_incomplete",
+                    "index" to i.toString(),
+                )
+                continue
+            }
             val arr = DoubleArray(21 * 3)
             for (j in 0 until 21) {
                 val p = lm[j]
@@ -239,45 +359,198 @@ class LandmarkEngine(
                 arr[j * 3 + 1] = p.y().toDouble()
                 arr[j * 3 + 2] = p.z().toDouble()
             }
-            // MediaPipe etiqueta la mano asumiendo imagen sin espejear. Con la
-            // camara frontal el preview se ve espejeado pero el frame que
-            // analizamos no lo esta, asi que la etiqueta es la correcta.
-            val etiqueta = lados.getOrNull(i)?.firstOrNull()?.categoryName()
-            if (etiqueta == "Left") izq = arr else der = arr
+            if (arr.any { !it.isFinite() }) {
+                erroresEntrada += mapOf(
+                    "stage" to "capture",
+                    "code" to "point_non_finite",
+                    "index" to i.toString(),
+                )
+                continue
+            }
+            candidatas += ManoCandidata(
+                puntos = arr,
+                // Conservar score para calidad; nunca usar categoryName para
+                // decidir lado físico.
+                confianza = categorias.getOrNull(i)?.firstOrNull()?.score()
+                    ?.toDouble() ?: .5,
+                muñecaX = lm[0].x().toDouble(),
+                muñecaY = lm[0].y().toDouble(),
+            )
+        }
+        val poseCadenaDisponible = poseParaLados != null &&
+            poseParaLados.size >= 33 * 4 && poseTieneCadenaBrazo(poseParaLados)
+        val ladosCadena = if (poseCadenaDisponible) {
+            asignarLadosCadena(candidatas, poseParaLados!!)
+        } else emptyList()
+        ultimoAssignmentMode = when {
+            !poseCadenaDisponible -> "pose_pending"
+            ladosCadena.any { it != null } -> "pose_arm_chain"
+            else -> "ambiguous"
+        }
+        val trackCandidates = candidatas.mapIndexed { index, candidata ->
+            val ladoCadena = ladosCadena.getOrNull(index)
+            HandTrackCoordinator.Candidate(
+                candidata.puntos,
+                ladoCadena,
+                candidata.confianza,
+                sideLocked = ladoCadena != null,
+                // No usar etiqueta HandLandmarker antes de autoridad Pose.
+                sideAmbiguous = !poseCadenaDisponible || ladoCadena == null,
+            )
         }
 
-        completar(t) { it.left = izq; it.right = der; it.tieneManos = true }
-
-        val (pose, poseMundo) = synchronized(ultimoLock) {
+        var fusionado: FrameResult? = null
+        val preview = synchronized(ultimoLock) {
+            val poseHint = poseParaLados?.takeIf {
+                poseCadenaDisponible && it.size >= 33 * 4
+            }?.let {
+                HandTrackCoordinator.PoseHint(
+                    it[15 * 4], it[15 * 4 + 1],
+                    it[16 * 4], it[16 * 4 + 1],
+                    max(.05, distanciaPose(it, 11, 12)),
+                )
+            }
+            val tracked = handTracker.update(trackCandidates, poseHint, t)
+            val izq = tracked.left.detected
+            val der = tracked.right.detected
+            ultimoTracking = tracked
             ultimaIzq = izq
             ultimaDer = der
-            ultimaPose to ultimaPoseMundo
+            ultimoTimestampManos = t
+            manosConocidas = true
+            if (ultimoTimestampPose != Long.MIN_VALUE &&
+                abs(t - ultimoTimestampPose) <= ventanaFusionMs
+            ) {
+                fusionado = crearFrame(
+                    maxOf(t, ultimoTimestampPose),
+                    ultimaPose,
+                    ultimaPoseMundo,
+                    izq,
+                    der,
+                    tracked.left.render,
+                    tracked.right.render,
+                    ultimoTimestampPose,
+                    t,
+                    tracked,
+                    erroresEntrada,
+                )
+            }
+            crearFrame(
+                t,
+                ultimaPose,
+                ultimaPoseMundo,
+                izq,
+                der,
+                tracked.left.render,
+                tracked.right.render,
+                ultimoTimestampPose.takeIf { it != Long.MIN_VALUE },
+                t,
+                tracked,
+                erroresEntrada,
+            )
         }
-        onPreview(FrameResult(t, pose, poseMundo, izq, der))
+        onPreview(preview)
+        fusionado?.let(onFrame)
     }
 
-    private inline fun completar(t: Long, bloque: (Pendiente) -> Unit) {
-        var listo: FrameResult? = null
-        synchronized(pendientes) {
-            val p = pendientes[t] ?: return
-            bloque(p)
-            if (p.tienePose && p.tieneManos) {
-                pendientes.remove(t)
-                listo = FrameResult(t, p.pose, p.poseMundo, p.left, p.right)
-            }
+    private fun poseTieneCadenaBrazo(pose: DoubleArray): Boolean {
+        return listOf(11, 13, 15, 12, 14, 16).all { i ->
+            pose[i * 4].isFinite() && pose[i * 4 + 1].isFinite() &&
+                pose[i * 4 + 3].isFinite() &&
+                pose[i * 4 + 3] >= MIN_POSE_WRIST_VISIBILITY
         }
-        listo?.let(onFrame)
+    }
+
+    /** Coste anatomico: hombro -> codo -> muñeca, no imagen izquierda/derecha. */
+    private fun asignarLadosCadena(
+        candidatas: List<ManoCandidata>,
+        pose: DoubleArray,
+    ): List<String?> {
+        if (candidatas.isEmpty()) return emptyList()
+        val ancho = max(.05, distanciaPose(pose, 11, 12))
+        val margen = max(.06, ancho * .16)
+        val costos = candidatas.map { mano ->
+            costoCadenaBrazo(mano, pose, 11, 13, 15) to
+                costoCadenaBrazo(mano, pose, 12, 14, 16)
+        }
+        if (candidatas.size >= 2) {
+            val normal = costos[0].first + costos[1].second
+            val cruzada = costos[0].second + costos[1].first
+            if (normal.isFinite() && cruzada.isFinite() &&
+                abs(normal - cruzada) >= margen
+            ) {
+                return if (normal < cruzada) listOf("left", "right")
+                else listOf("right", "left")
+            }
+            // Ambiguous pair: do not guess side. Temporal tracker preserves
+            // existing identity; new detections remain unassigned.
+            return List(candidatas.size) { null }
+        }
+        return costos.map { (left, right) ->
+            if (left.isFinite() && right.isFinite() &&
+                abs(left - right) >= margen
+            ) if (left < right) "left" else "right" else null
+        }
+    }
+
+    private fun costoCadenaBrazo(
+        mano: ManoCandidata,
+        pose: DoubleArray,
+        hombro: Int,
+        codo: Int,
+        muneca: Int,
+    ): Double {
+        val sx = pose[hombro * 4]
+        val sy = pose[hombro * 4 + 1]
+        val ex = pose[codo * 4]
+        val ey = pose[codo * 4 + 1]
+        val wx = pose[muneca * 4]
+        val wy = pose[muneca * 4 + 1]
+        if (!listOf(sx, sy, ex, ey, wx, wy, mano.muñecaX, mano.muñecaY)
+                .all { it.isFinite() }
+        ) return Double.POSITIVE_INFINITY
+
+        val ancho = max(.05, distanciaPose(pose, 11, 12))
+        val endpoint = hypot(mano.muñecaX - wx, mano.muñecaY - wy) / ancho
+        val expectedX = wx - sx
+        val expectedY = wy - sy
+        val observedX = mano.muñecaX - sx
+        val observedY = mano.muñecaY - sy
+        val expectedLength = hypot(expectedX, expectedY)
+        val observedLength = hypot(observedX, observedY)
+        val direction = if (expectedLength <= 1e-8 || observedLength <= 1e-8) {
+            .5
+        } else {
+            val aligned = (expectedX * observedX + expectedY * observedY) /
+                (expectedLength * observedLength)
+            1.0 - ((aligned + 1.0) / 2.0).coerceIn(0.0, 1.0)
+        }
+        val expectedLower = hypot(wx - ex, wy - ey)
+        val observedLower = hypot(mano.muñecaX - ex, mano.muñecaY - ey)
+        val chain = abs(observedLower - expectedLower) / ancho
+        return endpoint + direction * .35 + chain * .20
+    }
+
+    private fun distanciaPose(pose: DoubleArray, a: Int, b: Int): Double {
+        val dx = pose[a * 4] - pose[b * 4]
+        val dy = pose[a * 4 + 1] - pose[b * 4 + 1]
+        return hypot(dx, dy)
     }
 
     fun cerrar() {
         handLandmarker.close()
         poseLandmarker.close()
-        synchronized(pendientes) { pendientes.clear() }
         synchronized(ultimoLock) {
             ultimaPose = null
             ultimaPoseMundo = null
+            ultimoTimestampPose = Long.MIN_VALUE
             ultimaIzq = null
             ultimaDer = null
+            ultimoTimestampManos = Long.MIN_VALUE
+            manosConocidas = false
+            ultimoTracking = null
+            ultimoAssignmentMode = "pose_pending"
+            handTracker.reset()
         }
         synchronized(manosLock) { manosEnVuelo = false }
         synchronized(poseLock) { poseEnVuelo = false }

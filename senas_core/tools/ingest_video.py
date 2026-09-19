@@ -97,16 +97,17 @@ def ingest_un_video(
         raise ValueError("el video no tiene frames legibles.")
 
     if espejo:
-        raw_frames = [(p, r, l) for (p, l, r) in raw_frames]
+        raw_frames = [(p, pm, r, l) for (p, pm, l, r) in raw_frames]
 
     # Normaliza frame por frame (igual que hace normalize_sequence), pero
     # por separado para poder reportar metricas de calidad reales antes de
     # guardar.
-    norm = [sn.normalize_frame(p, l, r) for (p, l, r) in raw_frames]
+    norm = [sn.normalize_frame(p, pm, l, r)
+            for (p, pm, l, r) in raw_frames]
     frames_invalidos = sum(1 for f in norm if f is None)
 
     visibilidades = []
-    for (p, _l, _r) in raw_frames:
+    for (p, _pm, _l, _r) in raw_frames:
         if p is not None and len(p) > max(sn.L_SHOULDER, sn.R_SHOULDER):
             ls, rs = p[sn.L_SHOULDER], p[sn.R_SHOULDER]
             if len(ls) > 3 and len(rs) > 3:

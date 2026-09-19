@@ -90,7 +90,8 @@ class _PantallaSyncState extends State<PantallaSync> {
     for (var i = 0; i < pendientes.length; i++) {
       final m = pendientes[i];
       if (mounted) {
-        setState(() => _progreso = 'Subiendo ${i + 1} de ${pendientes.length} (${m.gloss})...');
+        setState(() => _progreso =
+            'Subiendo ${i + 1} de ${pendientes.length} (${m.gloss})...');
       }
       try {
         await _api.subirMuestra(
@@ -100,6 +101,12 @@ class _PantallaSyncState extends State<PantallaSync> {
           categoria: m.categoria,
           signer: m.signer,
           nFramesOrig: m.nFramesOrig,
+          fps: m.fps,
+          duracionMs: m.duracionMs,
+          framesInvalidos: m.framesInvalidos,
+          visibilidadMin: m.visibilidadMin,
+          qualityScore: m.qualityScore,
+          checksumSha256: m.checksumSha256,
         );
         // Se marca una por una: si se corta la red a mitad, lo que ya subio
         // no se vuelve a subir la proxima vez.
@@ -149,6 +156,52 @@ class _PantallaSyncState extends State<PantallaSync> {
     }
   }
 
+  Future<void> _subirRaw() async {
+    final pendientes = _almacen.muestras
+        .where((m) => m.rawFramesPath != null && m.rawSubidaEn == null)
+        .toList();
+    if (pendientes.isEmpty) {
+      _mostrar('No hay landmarks crudos pendientes.');
+      return;
+    }
+
+    setState(() {
+      _trabajando = true;
+      _resultado = null;
+      _progreso = 'Subiendo landmarks 0 de ${pendientes.length}...';
+    });
+    var ok = 0;
+    final errores = <String>[];
+    for (var i = 0; i < pendientes.length; i++) {
+      final muestra = pendientes[i];
+      if (mounted) {
+        setState(() => _progreso =
+            'Subiendo landmarks ${i + 1} de ${pendientes.length} (${muestra.gloss})...');
+      }
+      try {
+        final bytes = await _almacen.cargarRawComprimido(muestra);
+        if (bytes == null) throw StateError('no existe sidecar local');
+        final uri = await _api.subirLandmarksCrudos(
+          bucket: 'motion-raw',
+          objectPath: 'raw/${muestra.id}.json.gz',
+          gzipBytes: bytes,
+        );
+        await _almacen.marcarRawSubida(muestra.id, uri);
+        ok++;
+      } catch (e) {
+        errores.add('${muestra.gloss}: $e');
+        if (errores.length >= 3) break;
+      }
+    }
+    if (errores.isEmpty) {
+      _mostrar('$ok archivos de landmarks subidos. No contienen video.');
+    } else {
+      _mostrar(
+          '$ok subidos, ${errores.length} con error.\n\n${errores.join("\n\n")}',
+          error: true);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final sinSubir = _almacen.sinSubir.length;
@@ -164,7 +217,6 @@ class _PantallaSyncState extends State<PantallaSync> {
               'Sin eso, la app funciona igual pero solo con las muestras de este teléfono.',
               Colors.orange.shade800,
             ),
-
           _seccion(
             icono: Icons.cloud_upload_outlined,
             titulo: 'Subir mis muestras',
@@ -176,7 +228,23 @@ class _PantallaSyncState extends State<PantallaSync> {
             habilitado: !_trabajando && sinSubir > 0,
             onPressed: _subir,
           ),
-
+          _seccion(
+            icono: Icons.data_object,
+            titulo: 'Subir landmarks crudos (opcional)',
+            detalle: _almacen.muestras
+                        .where((m) =>
+                            m.rawFramesPath != null && m.rawSubidaEn == null)
+                        .length ==
+                    0
+                ? 'No hay archivos crudos pendientes.'
+                : 'Solo sube coordenadas comprimidas para auditoría o re-normalización. '
+                    'Nunca sube video.',
+            boton: 'Subir landmarks',
+            habilitado: !_trabajando &&
+                _almacen.muestras.any(
+                    (m) => m.rawFramesPath != null && m.rawSubidaEn == null),
+            onPressed: _subirRaw,
+          ),
           _seccion(
             icono: Icons.cloud_download_outlined,
             titulo: 'Bajar el diccionario',
@@ -190,28 +258,30 @@ class _PantallaSyncState extends State<PantallaSync> {
             habilitado: !_trabajando,
             onPressed: _bajar,
           ),
-
           const SizedBox(height: 8),
           OutlinedButton.icon(
             onPressed: _trabajando ? null : _probar,
             icon: const Icon(Icons.wifi_tethering),
             label: const Text('Probar conexión'),
           ),
-
           const SizedBox(height: 16),
           if (_progreso != null)
             Row(
               children: [
                 const SizedBox(
-                    width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2)),
                 const SizedBox(width: 12),
                 Expanded(child: Text(_progreso!)),
               ],
             ),
           if (_resultado != null)
-            _cinta(_resultado!,
-                _resultadoEsError ? Colors.orange.shade800 : Colors.green.shade700),
-
+            _cinta(
+                _resultado!,
+                _resultadoEsError
+                    ? Colors.orange.shade800
+                    : Colors.green.shade700),
           const SizedBox(height: 24),
           Text(
             'Por qué las muestras entran como "pendiente": la app usa la clave '

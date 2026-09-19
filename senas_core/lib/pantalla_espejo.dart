@@ -9,30 +9,36 @@
 /// el resultado al instante, con la referencia delante.
 ///
 /// El camino del dato es el mismo de siempre, solo que sin buffer:
-///   camara nativa -> LandmarkFrame -> sign_norm (138 dims) -> avatar
+///   camara nativa -> LandmarkFrame fusionado -> sign_norm (152 dims) -> avatar
 library pantalla_espejo;
 
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
+import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import 'avatar_bridge.dart';
 import 'camera_bridge.dart';
 import 'controlador_captura.dart';
+import 'motion_contract.dart';
+import 'muestras_locales.dart';
 import 'skeleton_painter.dart' show SkeletonPainter;
 
 /// Cada cuanto se le manda un frame al WebView. La camara entrega a ~30 fps,
 /// pero cada envio cruza el puente de JavaScript y ademas obliga a redibujar
-/// la escena 3D. A 30 fps el telefono se satura y el avatar se siente MAS
-/// lento, no mas rapido, porque los mensajes se encolan. 20 fps se ve fluido
-/// y deja aire para que MediaPipe siga corriendo.
-const Duration kIntervaloEnvio = Duration(milliseconds: 50);
+/// la escena 3D. Entrada usa ultimo frame y nunca acumula mensajes; render del
+/// avatar queda libre para actualizarse a 60 FPS.
+const Duration kIntervaloEnvio = Duration(milliseconds: 33);
 
 class PantallaEspejo extends StatefulWidget {
-  const PantallaEspejo({super.key});
+  final bool iniciarCalibracion;
+
+  const PantallaEspejo({super.key, this.iniciarCalibracion = false});
 
   @override
   State<PantallaEspejo> createState() => _PantallaEspejoState();
@@ -41,9 +47,12 @@ class PantallaEspejo extends StatefulWidget {
 class _PantallaEspejoState extends State<PantallaEspejo> {
   final _ctrl = ControladorCaptura();
   final _bridge = AvatarBridge();
+  final _almacen = AlmacenMuestras.instancia;
 
   StreamSubscription<LandmarkFrame>? _sub;
   DateTime _ultimoEnvio = DateTime.fromMillisecondsSinceEpoch(0);
+  LandmarkFrame? _pendiente;
+  Timer? _envioProgramado;
 
   /// True mientras hay un frame viajando al WebView. Sin esto los envios se
   /// encolan y el avatar termina arrastrando varios segundos de retraso.
@@ -59,7 +68,30 @@ class _PantallaEspejoState extends State<PantallaEspejo> {
     super.initState();
     _ctrl.addListener(_alCambiar);
     _bridge.onPoseCapturada = _copiarPose;
+    _bridge.onDiagnosticReport = _compartirDiagnostico;
+    _bridge.onCalibrationChanged = _guardarCalibracion;
     _arrancar();
+  }
+
+  Future<void> _compartirDiagnostico(String json) async {
+    final directory = await getTemporaryDirectory();
+    final path = '${directory.path}/rig_diagnostic_'
+        '${DateTime.now().millisecondsSinceEpoch}.json';
+    final file = File(path);
+    await file.writeAsString(json, flush: true);
+    await Share.shareXFiles(
+      [XFile(file.path, mimeType: 'application/json')],
+      text: 'Diagnóstico RigBody (solo landmarks, sin video)',
+    );
+  }
+
+  Future<void> _guardarCalibracion(RigCalibration calibration) async {
+    final ajustes = _almacen.ajustes.copiar()..rigCalibration = calibration;
+    await _almacen.guardarAjustes(ajustes);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+      content: Text('Calibración de pulgares guardada.'),
+    ));
   }
 
   /// Llega desde el boton "Copiar pose" del editor del visor. Se copia al
@@ -80,6 +112,7 @@ class _PantallaEspejoState extends State<PantallaEspejo> {
   }
 
   Future<void> _arrancar() async {
+    await AlmacenMuestras.instancia.cargar();
     final permiso = await Permission.camera.request();
     if (!permiso.isGranted) {
       if (mounted) {
@@ -87,40 +120,90 @@ class _PantallaEspejoState extends State<PantallaEspejo> {
       }
       return;
     }
-    await _ctrl.iniciar(frontal: true);
+    await _ctrl.iniciar(frontal: _almacen.ajustes.camaraFrontal);
+    await _bridge.configurarRig(_almacen.ajustes.rigCalibration);
+    await _bridge.configurarDiagnostico(
+      _almacen.ajustes.rigDiagnosticMode || widget.iniciarCalibracion,
+    );
+    if (widget.iniciarCalibracion) {
+      await _bridge.iniciarCalibracionPulgares();
+    }
     if (!mounted) return;
     _empezarEspejo();
   }
 
   void _empezarEspejo() {
     _sub?.cancel();
-    _sub = _ctrl.camara.framesPreview.listen(_alFrame);
+    // El preview sigue alimentando SkeletonPainter; RigBody usa frames
+    // fusionados para no animar con pose y manos de timestamps distintos.
+    _sub = _ctrl.camara.frames.listen(_alFrame);
     setState(() => _espejando = true);
   }
 
   void _pararEspejo() {
     _sub?.cancel();
     _sub = null;
+    _pendiente = null;
+    _envioProgramado?.cancel();
+    _envioProgramado = null;
     setState(() => _espejando = false);
   }
 
-  Future<void> _alFrame(LandmarkFrame f) async {
+  void _alFrame(LandmarkFrame f) {
+    if (!_espejando) return;
+    _pendiente = f; // último frame gana; nunca acumular cola.
+    _enviarPendiente();
+  }
+
+  Future<void> _enviarPendiente() async {
     if (!_espejando || _enVuelo) return;
 
+    final f = _pendiente;
+    if (f == null) return;
+
     final ahora = DateTime.now();
-    if (ahora.difference(_ultimoEnvio) < kIntervaloEnvio) return;
+    final restante = kIntervaloEnvio - ahora.difference(_ultimoEnvio);
+    if (restante > Duration.zero) {
+      _envioProgramado ??= Timer(restante, () {
+        _envioProgramado = null;
+        _enviarPendiente();
+      });
+      return;
+    }
+    _pendiente = null;
 
     // normalize() devuelve null si no hay pose usable (persona fuera de
-    // cuadro, hombros no visibles). En ese caso simplemente no se manda
-    // nada y el avatar se queda en la ultima pose, que se ve mejor que un
-    // salto a reposo cada vez que el tracking parpadea.
+    // cuadro, hombros no visibles). En ese caso no se manda nada: WebView
+    // conserva pose durante un gap breve y su watchdog vuelve a reposo si el
+    // stream queda silencioso mas de 450 ms.
     final v = f.normalize();
     if (v == null) return;
+    final render = f.normalizeForRender() ?? v;
 
     _ultimoEnvio = ahora;
     _enVuelo = true;
     try {
-      await _bridge.mostrarFrame(v);
+      await _bridge.mostrarFrame(
+        v,
+        renderFrame: render,
+        timestampMs: f.timestampMs,
+        quality: f.esValido ? (f.visibilidadMin ?? 1.0) : 0.0,
+        sourceMeta: {
+          if (f.poseTimestampMs != null) 'pose_t': f.poseTimestampMs,
+          if (f.handsTimestampMs != null) 'hands_t': f.handsTimestampMs,
+          if (f.sourceSkewMs != null) 'source_skew_ms': f.sourceSkewMs,
+          'association': f.association,
+          'tracks': {
+            'left': f.association['left_state'],
+            'right': f.association['right_state'],
+          },
+          'contact': {
+            'active': f.association['contact'] == true,
+            'wrist_distance_shoulders': f.association['contact_wrist_distance'],
+          },
+          'errors': f.errors,
+        },
+      );
       if (mounted) _framesEnviados++;
     } catch (_) {
       // El WebView puede no estar listo todavia (el VRM tarda en cargar).
@@ -128,12 +211,14 @@ class _PantallaEspejoState extends State<PantallaEspejo> {
       // en 50 ms.
     } finally {
       _enVuelo = false;
+      if (_pendiente != null) _enviarPendiente();
     }
   }
 
   @override
   void dispose() {
     _sub?.cancel();
+    _envioProgramado?.cancel();
     _ctrl.removeListener(_alCambiar);
     _ctrl.dispose();
     _bridge.dispose();
@@ -206,11 +291,13 @@ class _PantallaEspejoState extends State<PantallaEspejo> {
         aspectRatio: camara.relacionAspecto,
         child: Stack(
           children: [
-            Positioned.fill(child: Texture(textureId: camara.textureId)),
+            Positioned.fill(
+              child: Texture(textureId: camara.textureId),
+            ),
             ValueListenableBuilder<LandmarkFrame?>(
               valueListenable: _ctrl.frame,
               builder: (_, frame, __) => CustomPaint(
-                painter: SkeletonPainter(frame: frame, espejo: camara.espejo),
+                painter: SkeletonPainter(frame: frame),
                 size: Size.infinite,
               ),
             ),
@@ -229,8 +316,7 @@ class _PantallaEspejoState extends State<PantallaEspejo> {
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (_mostrarCamara)
-              SizedBox(width: 96, child: _preview()),
+            if (_mostrarCamara) SizedBox(width: 96, child: _preview()),
             if (_mostrarCamara) const SizedBox(width: 10),
             Expanded(
               child: Column(
@@ -243,8 +329,8 @@ class _PantallaEspejoState extends State<PantallaEspejo> {
                   ),
                   const SizedBox(height: 6),
                   Text('$_framesEnviados frames enviados',
-                      style: const TextStyle(
-                          color: Colors.white38, fontSize: 11)),
+                      style:
+                          const TextStyle(color: Colors.white38, fontSize: 11)),
                   const SizedBox(height: 8),
                   SizedBox(
                     width: double.infinity,
@@ -279,10 +365,15 @@ class _PantallaEspejoState extends State<PantallaEspejo> {
             ),
           ),
         );
-    return Row(mainAxisSize: MainAxisSize.min, children: [
+    final modo = frame?.association['hand_assignment_mode'] ?? 'pose_pending';
+    return Wrap(spacing: 4, runSpacing: 2, children: [
       punto('Cuerpo', frame?.pose != null),
       punto('Izq', frame?.left != null),
       punto('Der', frame?.right != null),
+      Text(
+        'Lados: $modo',
+        style: const TextStyle(color: Colors.white60, fontSize: 11),
+      ),
     ]);
   }
 }

@@ -18,7 +18,9 @@ import 'package:crypto/crypto.dart' show sha1;
 import 'package:http/http.dart' as http;
 
 import 'config_supabase.dart';
-import 'sign_norm.dart' show kNormVersion, kFrameDim, packF16, unpackF16;
+import 'motion_contract.dart';
+import 'sign_norm.dart'
+    show kNormVersion, kTFrames, kFrameDim, packF16, unpackF16;
 
 class SupabaseError implements Exception {
   final String mensaje;
@@ -41,18 +43,24 @@ class PlantillaRemota {
         'gloss': gloss,
         'espanol': espanol,
         'seq': seq
-            .map((f) => f.map((v) => double.parse(v.toStringAsFixed(5))).toList())
+            .map((f) =>
+                f.map((v) => double.parse(v.toStringAsFixed(5))).toList())
             .toList(),
       };
 
-  factory PlantillaRemota.fromJson(Map<String, dynamic> j) => PlantillaRemota(
-        j['sign_id'] as String,
-        j['gloss'] as String,
-        (j['espanol'] as String?) ?? '',
-        (j['seq'] as List<dynamic>)
-            .map((f) => (f as List<dynamic>).map((v) => (v as num).toDouble()).toList())
-            .toList(),
-      );
+  factory PlantillaRemota.fromJson(Map<String, dynamic> j) {
+    final seq = (j['seq'] as List<dynamic>)
+        .map((f) =>
+            (f as List<dynamic>).map((v) => (v as num).toDouble()).toList())
+        .toList();
+    MotionSequenceV2.fromFrames(seq);
+    return PlantillaRemota(
+      j['sign_id'] as String,
+      j['gloss'] as String,
+      (j['espanol'] as String?) ?? '',
+      seq,
+    );
+  }
 }
 
 /// UUID v5 igual al que genera signer_uuid() en ingest_video.py, para que la
@@ -61,10 +69,25 @@ class PlantillaRemota {
 String signerUuid(String nombre) {
   // namespace DNS: 6ba7b810-9dad-11d1-80b4-00c04fd430c8
   const ns = <int>[
-    0x6b, 0xa7, 0xb8, 0x10, 0x9d, 0xad, 0x11, 0xd1,
-    0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
+    0x6b,
+    0xa7,
+    0xb8,
+    0x10,
+    0x9d,
+    0xad,
+    0x11,
+    0xd1,
+    0x80,
+    0xb4,
+    0x00,
+    0xc0,
+    0x4f,
+    0xd4,
+    0x30,
+    0xc8,
   ];
-  final nombreBytes = utf8.encode('univoz-signer:${nombre.trim().toLowerCase()}');
+  final nombreBytes =
+      utf8.encode('univoz-signer:${nombre.trim().toLowerCase()}');
   final h = sha1.convert([...ns, ...nombreBytes]).bytes;
 
   final b = List<int>.from(h.sublist(0, 16));
@@ -129,7 +152,8 @@ class SupabaseApi {
   /// politicas de lectura estan puestas.
   Future<String> probar() async {
     if (!haySupabaseConfigurado) {
-      throw SupabaseError('Falta cargar la URL y la clave en config_supabase.dart.');
+      throw SupabaseError(
+          'Falta cargar la URL y la clave en config_supabase.dart.');
     }
     final r = await _http.get(
       _uri('v_dtw_aprobadas', {'select': 'gloss', 'limit': '1'}),
@@ -145,7 +169,8 @@ class SupabaseApi {
   }
 
   /// Busca la sena por glosa; si no existe la crea. Devuelve su id.
-  Future<String> _idDeSena(String gloss, String espanol, String? categoria) async {
+  Future<String> _idDeSena(
+      String gloss, String espanol, String? categoria) async {
     final existentes = await _http.get(
       _uri('signs', {'gloss': 'eq.$gloss', 'select': 'id', 'limit': '1'}),
       headers: _cabeceras,
@@ -187,10 +212,18 @@ class SupabaseApi {
     String? categoria,
     String? signer,
     int? nFramesOrig,
+    double? fps,
+    int? duracionMs,
+    int? framesInvalidos,
+    double? visibilidadMin,
+    double? qualityScore,
+    String? checksumSha256,
   }) async {
     if (!haySupabaseConfigurado) {
-      throw SupabaseError('Falta cargar la URL y la clave en config_supabase.dart.');
+      throw SupabaseError(
+          'Falta cargar la URL y la clave en config_supabase.dart.');
     }
+    MotionSequenceV2.fromFrames(seq);
 
     final signId = await _idDeSena(gloss, espanol, categoria);
 
@@ -204,6 +237,12 @@ class SupabaseApi {
         if (signer != null && signer.trim().isNotEmpty)
           'signer_id': signerUuid(signer),
         if (nFramesOrig != null) 'n_frames_orig': nFramesOrig,
+        if (fps != null) 'fps': fps,
+        if (duracionMs != null) 'duracion_ms': duracionMs,
+        if (framesInvalidos != null) 'frames_invalidos': framesInvalidos,
+        if (visibilidadMin != null) 'visibilidad_min': visibilidadMin,
+        if (qualityScore != null) 'quality_score': qualityScore,
+        if (checksumSha256 != null) 'checksum_sha256': checksumSha256,
       }),
     );
     if (muestra.statusCode >= 400) _fallo('Subir la muestra', muestra);
@@ -233,20 +272,20 @@ class SupabaseApi {
   /// Baja todas las plantillas aprobadas de esta version de normalizacion.
   Future<List<PlantillaRemota>> descargarPlantillas() async {
     if (!haySupabaseConfigurado) {
-      throw SupabaseError('Falta cargar la URL y la clave en config_supabase.dart.');
+      throw SupabaseError(
+          'Falta cargar la URL y la clave en config_supabase.dart.');
     }
 
     final r = await _http.get(
-      _uri('v_dtw_aprobadas', {
+      _uri('v_motion_v2_aprobadas', {
         'select': 'sign_id,gloss,espanol,t_frames,frame_dim,data',
         'norm_version': 'eq.$kNormVersion',
       }),
       headers: _cabeceras,
     );
     if (r.statusCode == 404) {
-      throw SupabaseError(
-          'No existe la vista v_dtw_aprobadas. Corré sql/002_app_acceso.sql '
-          'en el SQL Editor de Supabase.');
+      throw SupabaseError('No existe la vista v_motion_v2_aprobadas. Corré '
+          'sql/004_motion_v2.sql en el SQL Editor de Supabase.');
     }
     if (r.statusCode >= 400) _fallo('Descargar el diccionario', r);
 
@@ -257,8 +296,21 @@ class SupabaseApi {
       final crudo = m['data'];
       if (crudo is! String) continue;
       final dim = (m['frame_dim'] as num?)?.toInt() ?? kFrameDim;
-      final seq = unpackF16(_desdeHexPostgres(crudo), dim: dim);
+      final t = (m['t_frames'] as num?)?.toInt() ?? kTFrames;
+      if (dim != kFrameDim ||
+          t != kTFrames ||
+          (m['norm_version'] as String?) != kNormVersion) {
+        continue;
+      }
+      final bytes = _desdeHexPostgres(crudo);
+      if (bytes.length != kTFrames * kFrameDim * 2) continue;
+      final seq = unpackF16(bytes, dim: dim);
       if (seq.isEmpty) continue;
+      try {
+        MotionSequenceV2.fromFrames(seq);
+      } catch (_) {
+        continue;
+      }
       out.add(PlantillaRemota(
         m['sign_id'] as String,
         m['gloss'] as String,
@@ -267,6 +319,32 @@ class SupabaseApi {
       ));
     }
     return out;
+  }
+
+  /// Sube raw landmarks comprimidos a Storage. Nunca se invoca durante la
+  /// captura normal; requiere acción explícita y políticas de Storage.
+  Future<String> subirLandmarksCrudos({
+    required String bucket,
+    required String objectPath,
+    required Uint8List gzipBytes,
+  }) async {
+    if (!haySupabaseConfigurado) {
+      throw SupabaseError(
+          'Falta cargar la URL y la clave en config_supabase.dart.');
+    }
+    final uri = Uri.parse('$url/storage/v1/object/$bucket/$objectPath');
+    final r = await _http.post(
+      uri,
+      headers: {
+        'apikey': clave,
+        'Authorization': 'Bearer $clave',
+        'Content-Type': 'application/gzip',
+        'x-upsert': 'false',
+      },
+      body: gzipBytes,
+    );
+    if (r.statusCode >= 400) _fallo('Subir landmarks crudos', r);
+    return '$bucket/$objectPath';
   }
 
   void cerrar() => _http.close();

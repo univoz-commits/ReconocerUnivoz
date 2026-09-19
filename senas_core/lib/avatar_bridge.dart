@@ -7,14 +7,13 @@
 ///      dtw.dart / sign_norm.dart) para que la anime.
 ///   3. Avisar cuando termina de reproducir, via un JavaScriptChannel.
 ///
-/// Nota sobre el formato de los frames: sign_norm.dart guarda el cuerpo en
-/// 2D nomas (ver kOffBody: codos y munecas x,y, sin z -- la Z de MediaPipe
-/// Pose es ruidosa y se descarta a proposito, ver ese archivo). El visor
-/// reconstruye una profundidad plausible con una IK de 2 huesos asumiendo
-/// que el codo se dobla hacia adelante, que es como se sena de frente a una
-/// camara. No es una reconstruccion 3D real, es una aproximacion razonable.
-/// Las manos si tienen XYZ completo relativo a la muneca, asi que los dedos
-/// se animan con mas fidelidad que el brazo.
+/// Nota sobre el formato de los frames: sign_norm.dart guarda 152 valores por
+/// frame. El bloque de cuerpo usa worldLandmarks de MediaPipe proyectados en
+/// una base ortonormal 3D; el bloque de manos combina posicion metrica y
+/// forma relativa. El visor convierte ese espacio a huesos VRM con IK de dos
+/// huesos y orientacion de muneca, sin inventar profundidad fija por brazo.
+/// La Z sigue siendo calibrable porque su signo depende de la convención del
+/// modelo y de la camara.
 ///
 /// Tambien por construccion de sign_norm.dart: el origen (0,0) es el punto
 /// medio entre hombros, el eje X va del hombro izquierdo al derecho, y todo
@@ -29,6 +28,9 @@ import 'dart:convert';
 import 'package:flutter/material.dart' show Color;
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:webview_flutter/webview_flutter.dart';
+
+import 'motion_contract.dart';
+import 'sign_norm.dart' show kNormVersion, kTFrames, kFrameDim;
 
 // Modelo actual: VRM 0.0 exportado de VRoid Studio 1.22.1. Tiene el mapa
 // humanoide completo (54 huesos, 15 por mano) y los blendshapes de
@@ -46,6 +48,12 @@ class AvatarBridge {
   /// que llega es el volcado completo de los huesos movidos, listo para
   /// pegar. La pantalla que lo reciba se encarga de copiarlo al portapapeles.
   void Function(String)? onPoseCapturada;
+  void Function(String)? onDiagnosticReport;
+  void Function(RigCalibration)? onCalibrationChanged;
+  RigCalibration _calibracion = const RigCalibration();
+  bool _jsListo = false;
+  bool _diagnostico = false;
+  bool _calibracionPendiente = false;
 
   AvatarBridge() {
     controller = WebViewController()
@@ -58,11 +66,32 @@ class AvatarBridge {
             onTerminado?.call();
           } else if (msg.message.startsWith('pose:')) {
             onPoseCapturada?.call(msg.message.substring(5));
+          } else if (msg.message.startsWith('diagnostic_report:')) {
+            onDiagnosticReport?.call(msg.message.substring(18));
+          } else if (msg.message.startsWith('thumb_calibration:')) {
+            try {
+              final thumbs = jsonDecode(msg.message.substring(18));
+              if (thumbs is Map) {
+                final left = (thumbs['left'] as Map?)?.cast<String, dynamic>();
+                final right =
+                    (thumbs['right'] as Map?)?.cast<String, dynamic>();
+                if (left != null && right != null) {
+                  _calibracion = _calibracion.copyWith(
+                    leftThumb: ThumbCalibration.fromJson(left),
+                    rightThumb: ThumbCalibration.fromJson(right),
+                  );
+                  onCalibrationChanged?.call(_calibracion);
+                }
+              }
+            } catch (_) {
+              // Mensaje de diagnóstico corrupto no debe detener avatar.
+            }
           } else if (msg.message == 'js_listo') {
             // La pagina ya importo three.js/three-vrm y esta lista para
             // recibir el modelo. Se lo mandamos nosotros en vez de que lo
             // pida por fetch(): mas confiable dentro de un WebView cargado
             // con loadFlutterAsset (ver la nota grande en index.html).
+            _jsListo = true;
             _cargarAvatar();
           }
         },
@@ -75,6 +104,37 @@ class AvatarBridge {
     final b64 = base64Encode(
         datos.buffer.asUint8List(datos.offsetInBytes, datos.lengthInBytes));
     await controller.runJavaScript("window.cargarAvatarBase64('$b64')");
+    await controller.runJavaScript(
+        "window.configurarRig('${_escapar(jsonEncode(_calibracion.toJson()))}')");
+    await controller
+        .runJavaScript('window.configurarDiagnostico($_diagnostico)');
+    if (_calibracionPendiente) {
+      _calibracionPendiente = false;
+      await controller.runJavaScript('window.iniciarCalibracionPulgares()');
+    }
+  }
+
+  /// Configura adaptación del espacio normalizado al esqueleto VRM.
+  Future<void> configurarRig(RigCalibration calibracion) async {
+    _calibracion = calibracion;
+    if (!_jsListo) return;
+    await controller.runJavaScript(
+        "window.configurarRig('${_escapar(jsonEncode(calibracion.toJson()))}')");
+  }
+
+  Future<void> configurarDiagnostico(bool activo) async {
+    _diagnostico = activo;
+    if (!_jsListo) return;
+    await controller.runJavaScript('window.configurarDiagnostico($activo)');
+  }
+
+  Future<void> iniciarCalibracionPulgares() async {
+    _calibracionPendiente = true;
+    _diagnostico = true;
+    if (!_jsListo) return;
+    _calibracionPendiente = false;
+    await controller.runJavaScript('window.configurarDiagnostico(true)');
+    await controller.runJavaScript('window.iniciarCalibracionPulgares()');
   }
 
   /// Elige que brazos anima el avatar. Muchas senas de LSM son de una sola
@@ -84,16 +144,20 @@ class AvatarBridge {
   /// Izquierda y derecha son las del AVATAR, no las de quien mira.
   Future<void> configurarManos(
       {bool izquierda = true, bool derecha = true}) async {
-    await controller.runJavaScript(
-        'window.configurarManos($izquierda, $derecha)');
+    await controller
+        .runJavaScript('window.configurarManos($izquierda, $derecha)');
   }
 
-  /// Reproduce una secuencia completa (lista de frames de 138 dimensiones
+  /// Reproduce una secuencia completa (lista de frames de 152 dimensiones
   /// cada uno, tal cual Template.seq en dtw.dart / plantillas.dart).
-  Future<void> reproducir(List<List<double>> seq) async {
+  Future<void> reproducir(List<List<double>> seq, {int fps = 30}) async {
+    final contrato = MotionSequenceV2.fromFrames(seq, fps: fps);
     final json = jsonEncode(seq);
-    await controller
-        .runJavaScript("window.reproducirSecuencia('${_escapar(json)}')");
+    await controller.runJavaScript(
+        "window.reproducirSecuencia('${_escapar(json)}',$fps,'$kNormVersion')");
+    // Validación ocurre antes de cruzar WebView; evita mezclar formatos legacy.
+    assert(contrato.tFrames == kTFrames &&
+        contrato.frames.first.length == kFrameDim);
   }
 
   /// Aplica UN frame al instante, sin cola ni interpolacion. Es lo que usa
@@ -102,18 +166,34 @@ class AvatarBridge {
   ///
   /// Devuelve cuando el WebView termino de procesarlo, para poder saltar
   /// frames en vez de encolarlos si el telefono no da abasto.
-  Future<void> mostrarFrame(List<double> v) async {
+  Future<void> mostrarFrame(
+    List<double> v, {
+    List<double>? renderFrame,
+    int? timestampMs,
+    double quality = 1.0,
+    Map<String, dynamic>? sourceMeta,
+  }) async {
+    MotionFrameV2(v);
+    if (renderFrame != null) MotionFrameV2(renderFrame);
+    final timestamp = timestampMs ?? DateTime.now().millisecondsSinceEpoch;
+    final calidad = quality.clamp(0.0, 1.0);
+    final renderJson = jsonEncode(renderFrame ?? v);
+    final metaJson = jsonEncode(sourceMeta ?? const <String, dynamic>{});
     await controller.runJavaScript(
-        "window.aplicarFrameVivo('${jsonEncode(v)}')");
+        "window.aplicarFrameVivo('${jsonEncode(v)}',$timestamp,$calidad,"
+        "'${_escapar(renderJson)}','${_escapar(metaJson)}')");
   }
 
   // Los frames son puramente numericos (nunca llevan comillas ni barras),
   // asi que esto es mas una red de seguridad que algo que vaya a activarse
   // en la practica.
-  String _escapar(String s) => s.replaceAll('\\', '\\\\').replaceAll("'", "\\'");
+  String _escapar(String s) =>
+      s.replaceAll('\\', '\\\\').replaceAll("'", "\\'");
 
   void dispose() {
     onTerminado = null;
     onPoseCapturada = null;
+    onDiagnosticReport = null;
+    onCalibrationChanged = null;
   }
 }

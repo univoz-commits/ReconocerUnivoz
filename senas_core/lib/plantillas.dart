@@ -16,8 +16,9 @@ import 'dart:convert';
 import 'package:flutter/services.dart' show rootBundle;
 
 import 'dtw.dart';
+import 'motion_contract.dart';
 import 'muestras_locales.dart';
-import 'sign_norm.dart' show kNormVersion, mirrorFrame;
+import 'sign_norm.dart' show kNormVersion, kFrameDim, kTFrames, mirrorFrame;
 
 const String kRutaPaquete = 'assets/plantillas.json';
 
@@ -72,19 +73,32 @@ Future<List<_Plantilla>> _leerPaquete(String ruta) async {
     // resultados sin sentido.
     return const [];
   }
+  if ((json['frame_dim'] as num?)?.toInt() != kFrameDim ||
+      (json['t_frames'] as num?)?.toInt() != kTFrames) {
+    return const [];
+  }
 
   final crudas = (json['plantillas'] as List<dynamic>?) ?? const [];
-  return crudas.map((p) {
-    final m = p as Map<String, dynamic>;
-    return _Plantilla(
-      m['sign_id'] as String,
-      m['gloss'] as String,
-      (m['espanol'] as String?) ?? '',
-      (m['seq'] as List<dynamic>)
-          .map((f) => (f as List<dynamic>).map((v) => (v as num).toDouble()).toList())
-          .toList(),
-    );
-  }).toList();
+  final out = <_Plantilla>[];
+  for (final p in crudas) {
+    try {
+      final m = p as Map<String, dynamic>;
+      final seq = (m['seq'] as List<dynamic>)
+          .map((f) =>
+              (f as List<dynamic>).map((v) => (v as num).toDouble()).toList())
+          .toList();
+      MotionSequenceV2.fromFrames(seq);
+      out.add(_Plantilla(
+        m['sign_id'] as String,
+        m['gloss'] as String,
+        (m['espanol'] as String?) ?? '',
+        seq,
+      ));
+    } catch (_) {
+      // Una plantilla corrupta no debe tumbar diccionario completo.
+    }
+  }
+  return out;
 }
 
 class _Plantilla {
@@ -137,8 +151,8 @@ Future<Diccionario> cargarDiccionario({String ruta = kRutaPaquete}) async {
     if (ajustes.espejoAutomatico) {
       // El espejo se calcula al vuelo en vez de guardarse: es barato y evita
       // duplicar el archivo de muestras en disco.
-      clasificador.add('local-espejo:${m.gloss}', m.gloss,
-          m.seq.map(mirrorFrame).toList(),
+      clasificador.add(
+          'local-espejo:${m.gloss}', m.gloss, m.seq.map(mirrorFrame).toList(),
           espanol: m.espanol);
       espejadas++;
     }

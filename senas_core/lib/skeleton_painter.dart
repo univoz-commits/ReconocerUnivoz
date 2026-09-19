@@ -3,8 +3,11 @@
 /// El pintor se usa con un ValueNotifier<LandmarkFrame> para que solo se
 /// repinte cuando cambian los landmarks, no en cada setState.
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
+import 'backend_api.dart';
 import 'camera_bridge.dart';
 import 'controlador_captura.dart';
 import 'dtw.dart';
@@ -14,14 +17,14 @@ import 'voz.dart';
 
 class SkeletonPainter extends CustomPainter {
   final LandmarkFrame? frame;
-  final bool espejo;
 
   static const double _minVisibility = 0.5;
 
   static const _colorCuerpo = Color(0xFF4A90E2);
-  static const _colorMano = Color(0xFFFF6B6B);
+  static const _colorIzquierda = Color(0xFFFFA726);
+  static const _colorDerecha = Color(0xFF42A5F5);
 
-  SkeletonPainter({this.frame, this.espejo = false});
+  SkeletonPainter({this.frame});
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -34,10 +37,12 @@ class SkeletonPainter extends CustomPainter {
 
     // Pinta las manos
     if (frame!.left != null) {
-      _paintMano(canvas, frame!.left!, size, esIzq: true);
+      _paintMano(canvas, frame!.left!, size,
+          color: _colorIzquierda, etiqueta: 'I');
     }
     if (frame!.right != null) {
-      _paintMano(canvas, frame!.right!, size, esIzq: false);
+      _paintMano(canvas, frame!.right!, size,
+          color: _colorDerecha, etiqueta: 'D');
     }
   }
 
@@ -61,12 +66,12 @@ class SkeletonPainter extends CustomPainter {
     // comisuras de la boca son la aproximacion mas cercana que existe),
     // 11/12 hombro izq/der, 13/14 codo izq/der, 15/16 muneca izq/der.
     const ramas = [
-      (0, 2),   // nariz - ojo izq
-      (2, 7),   // ojo izq - oreja izq
-      (0, 5),   // nariz - ojo der
-      (5, 8),   // ojo der - oreja der
-      (0, 9),   // nariz - comisura boca izq (zona menton)
-      (0, 10),  // nariz - comisura boca der (zona menton)
+      (0, 2), // nariz - ojo izq
+      (2, 7), // ojo izq - oreja izq
+      (0, 5), // nariz - ojo der
+      (5, 8), // ojo der - oreja der
+      (0, 9), // nariz - comisura boca izq (zona menton)
+      (0, 10), // nariz - comisura boca der (zona menton)
       (11, 12), // hombro izq - der
       (11, 13), // hombro izq - codo izq
       (13, 15), // codo izq - muneca izq
@@ -80,6 +85,7 @@ class SkeletonPainter extends CustomPainter {
       final pb = pose[b];
       if (pa.length < 4 || pb.length < 4) continue;
       if (pa[3] < _minVisibility || pb[3] < _minVisibility) continue;
+      if (!_puntoEnCuadro(pa) || !_puntoEnCuadro(pb)) continue;
 
       canvas.drawLine(
         _punto(pa, size),
@@ -96,23 +102,84 @@ class SkeletonPainter extends CustomPainter {
       if (i >= pose.length) continue;
       final p = pose[i];
       if (p.length < 4 || p[3] < _minVisibility) continue;
+      if (!_puntoEnCuadro(p)) continue;
       canvas.drawCircle(_punto(p, size), 3, puntoPaint);
     }
+
+    // La cadena Pose -> mano queda identificable incluso cuando la imagen
+    // frontal se interpreta al revés. I/D son lados anatómicos de la persona.
+    _paintLado(canvas, pose, size, 11, 13, 15, _colorIzquierda, 'H-I', 'I');
+    _paintLado(canvas, pose, size, 12, 14, 16, _colorDerecha, 'H-D', 'D');
+  }
+
+  void _paintLado(
+      Canvas canvas,
+      List<List<double>> pose,
+      Size size,
+      int hombro,
+      int codo,
+      int muneca,
+      Color color,
+      String etiquetaHombro,
+      String etiquetaMuneca) {
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = 3
+      ..strokeCap = StrokeCap.round;
+    void line(int a, int b) {
+      if (a >= pose.length || b >= pose.length) return;
+      final pa = pose[a], pb = pose[b];
+      if (pa.length < 4 ||
+          pb.length < 4 ||
+          pa[3] < _minVisibility ||
+          pb[3] < _minVisibility ||
+          !_puntoEnCuadro(pa) ||
+          !_puntoEnCuadro(pb)) return;
+      canvas.drawLine(_punto(pa, size), _punto(pb, size), paint);
+    }
+
+    line(hombro, codo);
+    line(codo, muneca);
+    if (hombro < pose.length) {
+      _paintEtiqueta(canvas, pose[hombro], size, etiquetaHombro, color);
+    }
+    if (muneca < pose.length) {
+      _paintEtiqueta(canvas, pose[muneca], size, etiquetaMuneca, color);
+    }
+  }
+
+  void _paintEtiqueta(
+      Canvas canvas, List<double> p, Size size, String texto, Color color) {
+    if (!_puntoEnCuadro(p)) return;
+    final painter = TextPainter(
+      text: TextSpan(
+        text: texto,
+        style: TextStyle(
+          color: color,
+          fontSize: 11,
+          fontWeight: FontWeight.bold,
+          backgroundColor: Colors.black54,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    painter.paint(canvas, _punto(p, size) + Offset(4, -painter.height - 2));
   }
 
   void _paintMano(
     Canvas canvas,
     List<List<double>> mano,
     Size size, {
-    required bool esIzq,
+    required Color color,
+    required String etiqueta,
   }) {
     final paint = Paint()
-      ..color = _colorMano
+      ..color = color
       ..strokeWidth = 1.5
       ..strokeCap = StrokeCap.round;
 
     final puntoPaint = Paint()
-      ..color = _colorMano
+      ..color = color
       ..style = PaintingStyle.fill;
 
     // MediaPipe Hand: conexiones entre dedos (ver el modelo oficial)
@@ -147,6 +214,7 @@ class SkeletonPainter extends CustomPainter {
       final pa = mano[a];
       final pb = mano[b];
       if (pa.length < 3 || pb.length < 3) continue;
+      if (!_puntoEnCuadro(pa) || !_puntoEnCuadro(pb)) continue;
 
       canvas.drawLine(
         _punto3d(pa, size),
@@ -157,22 +225,32 @@ class SkeletonPainter extends CustomPainter {
 
     for (final p in mano) {
       if (p.length < 3) continue;
+      if (!_puntoEnCuadro(p)) continue;
       canvas.drawCircle(_punto3d(p, size), 2, puntoPaint);
     }
+    if (mano.isNotEmpty)
+      _paintEtiqueta(canvas, mano.first, size, etiqueta, color);
   }
 
+  bool _puntoEnCuadro(List<double> p) =>
+      p.length >= 3 &&
+      p[0].isFinite &&
+      p[1].isFinite &&
+      p[2].isFinite &&
+      p[0] >= 0 &&
+      p[0] <= 1 &&
+      p[1] >= 0 &&
+      p[1] <= 1;
+
   Offset _punto(List<double> p, Size size) {
-    var x = p[0] * size.width;
-    var y = p[1] * size.height;
-    if (espejo) x = size.width - x;
-    return Offset(x, y);
+    return Offset(p[0] * size.width, p[1] * size.height);
   }
 
   Offset _punto3d(List<double> p, Size size) => _punto(p, size);
 
   @override
   bool shouldRepaint(SkeletonPainter old) =>
-      old.frame?.timestampMs != frame?.timestampMs || old.espejo != espejo;
+      old.frame?.timestampMs != frame?.timestampMs;
 }
 
 /// Camara en vivo + reconocimiento contra el diccionario local.
@@ -188,6 +266,7 @@ class _PantallaDeTranslacionState extends State<PantallaDeTranslacion>
   final _ctrl = ControladorCaptura();
   final _almacen = AlmacenMuestras.instancia;
   final _voz = LectorVoz.instancia;
+  final _backend = BackendApi();
   final _detector = DetectorAutomatico(
     // Menos frames quietos para cortar = reconoce mas rapido despues de
     // terminar la sena, a costa de ser un poco mas sensible a una micro
@@ -200,6 +279,8 @@ class _PantallaDeTranslacionState extends State<PantallaDeTranslacion>
   Prediction? _prediccion;
   List<MapEntry<double, Template>> _candidatas = const [];
   String? _aviso;
+  BackendPrediction? _prediccionBackend;
+  int _consultaBackend = 0;
 
   // ── Modo automático ──────────────────────────────────────────────────────
   bool _modoAuto = false;
@@ -340,9 +421,11 @@ class _PantallaDeTranslacionState extends State<PantallaDeTranslacion>
 
     setState(() {
       _prediccion = pred;
+      _prediccionBackend = null;
       _candidatas = unicas;
       _aviso = null;
     });
+    _consultarBackend(seq);
 
     if (pred.aceptada && _almacen.ajustes.hablarResultado) {
       _hablar(pred.textoHablado);
@@ -361,6 +444,7 @@ class _PantallaDeTranslacionState extends State<PantallaDeTranslacion>
     _ctrl.removeListener(_alCambiar);
     _detector.detener();
     _ctrl.dispose();
+    _backend.cerrar();
     _voz.detener();
     super.dispose();
   }
@@ -378,6 +462,7 @@ class _PantallaDeTranslacionState extends State<PantallaDeTranslacion>
     if (!_ctrl.grabando) {
       setState(() {
         _prediccion = null;
+        _prediccionBackend = null;
         _candidatas = const [];
         _aviso = null;
       });
@@ -411,9 +496,11 @@ class _PantallaDeTranslacionState extends State<PantallaDeTranslacion>
 
     setState(() {
       _prediccion = pred;
+      _prediccionBackend = null;
       _candidatas = unicas;
       _aviso = null;
     });
+    _consultarBackend(seq);
 
     if (pred.aceptada && _almacen.ajustes.hablarResultado) {
       _hablar(pred.textoHablado);
@@ -427,6 +514,18 @@ class _PantallaDeTranslacionState extends State<PantallaDeTranslacion>
         SnackBar(content: Text('No se pudo hablar el resultado: $error')),
       );
     });
+  }
+
+  Future<void> _consultarBackend(List<List<double>> seq) async {
+    if (!_backend.configurado) return;
+    final revision = ++_consultaBackend;
+    try {
+      final resultado = await _backend.clasificar(seq);
+      if (!mounted || revision != _consultaBackend) return;
+      setState(() => _prediccionBackend = resultado);
+    } catch (_) {
+      // DTW local ya entregó resultado; caída de red nunca bloquea voz ni UI.
+    }
   }
 
   // ── Build ─────────────────────────────────────────────────────────────────
@@ -484,9 +583,13 @@ class _PantallaDeTranslacionState extends State<PantallaDeTranslacion>
                   iconSize: 26,
                   icon: Icon(
                     _modoAuto ? Icons.touch_app : Icons.auto_fix_high,
-                    color: _modoAuto ? Colors.orange.shade700 : Colors.blue.shade800,
+                    color: _modoAuto
+                        ? Colors.orange.shade700
+                        : Colors.blue.shade800,
                   ),
-                  tooltip: _modoAuto ? 'Cambiar a modo manual' : 'Activar modo automático',
+                  tooltip: _modoAuto
+                      ? 'Cambiar a modo manual'
+                      : 'Activar modo automático',
                   onPressed: _toggleModoAuto,
                 ),
               ],
@@ -509,7 +612,8 @@ class _PantallaDeTranslacionState extends State<PantallaDeTranslacion>
             children: [
               Text(_ctrl.error!, textAlign: TextAlign.center),
               const SizedBox(height: 16),
-              ElevatedButton(onPressed: _arrancar, child: const Text('Reintentar')),
+              ElevatedButton(
+                  onPressed: _arrancar, child: const Text('Reintentar')),
             ],
           ),
         ),
@@ -528,11 +632,13 @@ class _PantallaDeTranslacionState extends State<PantallaDeTranslacion>
             aspectRatio: camara.relacionAspecto,
             child: Stack(
               children: [
-                Positioned.fill(child: Texture(textureId: camara.textureId)),
+                Positioned.fill(
+                  child: Texture(textureId: camara.textureId),
+                ),
                 ValueListenableBuilder<LandmarkFrame?>(
                   valueListenable: _ctrl.frame,
                   builder: (_, frame, __) => CustomPaint(
-                    painter: SkeletonPainter(frame: frame, espejo: camara.espejo),
+                    painter: SkeletonPainter(frame: frame),
                     size: Size.infinite,
                   ),
                 ),
@@ -567,10 +673,10 @@ class _PantallaDeTranslacionState extends State<PantallaDeTranslacion>
 
   Widget _chipEstadoAuto() {
     final (texto, color) = switch (_estadoAuto) {
-      EstadoAuto.quieto      => ('👁 Esperando seña...', Colors.black54),
-      EstadoAuto.grabando    => ('⏺ Grabando...', Colors.red.shade700),
+      EstadoAuto.quieto => ('👁 Esperando seña...', Colors.black54),
+      EstadoAuto.grabando => ('⏺ Grabando...', Colors.red.shade700),
       EstadoAuto.reconociendo => ('🔍 Reconociendo...', Colors.blue.shade700),
-      EstadoAuto.pausa       => ('✓ Listo', Colors.green.shade700),
+      EstadoAuto.pausa => ('✓ Listo', Colors.green.shade700),
     };
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
@@ -579,8 +685,8 @@ class _PantallaDeTranslacionState extends State<PantallaDeTranslacion>
         borderRadius: BorderRadius.circular(20),
       ),
       child: Text(texto,
-          style: const TextStyle(color: Colors.white, fontSize: 13,
-              fontWeight: FontWeight.w500)),
+          style: const TextStyle(
+              color: Colors.white, fontSize: 13, fontWeight: FontWeight.w500)),
     );
   }
 
@@ -593,6 +699,17 @@ class _PantallaDeTranslacionState extends State<PantallaDeTranslacion>
           mainAxisSize: MainAxisSize.min,
           children: [
             if (_prediccion != null) _tarjetaResultado(_prediccion!),
+            if (_prediccionBackend?.label != null)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'Backend: ${_prediccionBackend!.label} · '
+                  '${(_prediccionBackend!.confidence * 100).round()}% · '
+                  '${_prediccionBackend!.classifier}',
+                  style:
+                      TextStyle(fontSize: 11, color: Colors.blueGrey.shade600),
+                ),
+              ),
             if (_candidatas.length > 1) _listaCandidatas(),
             if (_aviso != null) _cinta(_aviso!, Colors.orange.shade800),
             if (_errorDiccionario != null)
@@ -616,8 +733,10 @@ class _PantallaDeTranslacionState extends State<PantallaDeTranslacion>
                 width: double.infinity,
                 child: ElevatedButton.icon(
                   onPressed: _ctrl.lista ? _alternar : null,
-                  icon: Icon(_ctrl.grabando ? Icons.stop : Icons.fiber_manual_record),
-                  label: Text(_ctrl.grabando ? 'Detener y reconocer' : 'Grabar seña'),
+                  icon: Icon(
+                      _ctrl.grabando ? Icons.stop : Icons.fiber_manual_record),
+                  label: Text(
+                      _ctrl.grabando ? 'Detener y reconocer' : 'Grabar seña'),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: _ctrl.grabando ? Colors.red : null,
                     foregroundColor: _ctrl.grabando ? Colors.white : null,
@@ -713,7 +832,8 @@ class _PantallaDeTranslacionState extends State<PantallaDeTranslacion>
                 children: [
                   Text(e.value.gloss, style: const TextStyle(fontSize: 13)),
                   Text(e.key.toStringAsFixed(3),
-                      style: TextStyle(fontSize: 13, color: Colors.grey.shade700)),
+                      style:
+                          TextStyle(fontSize: 13, color: Colors.grey.shade700)),
                 ],
               ),
             ),

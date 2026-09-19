@@ -63,6 +63,9 @@ def insertar_muestra(
     mano_dominante=None,
     estado="pendiente",
     derivada_de=None,
+    raw_landmarks_uri=None,
+    raw_landmarks_format=None,
+    checksum_sha256=None,
 ):
     with conn.cursor() as cur:
         cur.execute(
@@ -70,14 +73,16 @@ def insertar_muestra(
             INSERT INTO sign_samples
               (sign_id, origen, derivada_de, signer_id, mano_dominante, fps, duracion_ms,
                n_frames_orig, frames_invalidos, visibilidad_min, quality_score,
-               estado, video_uri)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+              estado, video_uri, raw_landmarks_uri, raw_landmarks_format,
+              checksum_sha256)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             RETURNING id
             """,
             (
                 sign_id, origen, derivada_de, signer_id, mano_dominante, fps, duracion_ms,
                 n_frames_orig, frames_invalidos, visibilidad_min, quality_score,
-                estado, video_uri,
+                estado, video_uri, raw_landmarks_uri, raw_landmarks_format,
+                checksum_sha256,
             ),
         )
         return cur.fetchone()[0]

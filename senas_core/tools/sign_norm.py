@@ -156,8 +156,15 @@ def normalize_frame(pose, pose_mundo=None, left=None, right=None,
         return None
 
     ls, rs = pose[L_SHOULDER], pose[R_SHOULDER]
-    if len(ls) > 3 and (ls[3] < min_visibility or rs[3] < min_visibility):
+    if len(ls) < 4 or len(rs) < 4:
         return None
+    if ls[3] < min_visibility or rs[3] < min_visibility:
+        return None
+
+    for idx in POSE_BODY_IDX:
+        if (len(pose_mundo[idx]) < 3 or
+                not all(math.isfinite(v) for v in pose_mundo[idx][:3])):
+            return None
 
     base = _base_cuerpo(pose_mundo)
     if base is None:
@@ -300,7 +307,7 @@ def mirror_sequence(seq):
 
 
 def pack_f16(seq):
-    """Empaqueta t x 138 floats a bytes float16, para la columna BYTEA.
+    """Empaqueta t x 152 floats a bytes float16, para la columna BYTEA.
     Una seña de 32 frames pesa ~8.8 KB."""
     flat = [x for row in seq for x in row]
     return struct.pack("<%de" % len(flat), *flat)

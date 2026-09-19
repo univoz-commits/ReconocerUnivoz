@@ -41,6 +41,7 @@ def hacer_sena(semilla, n_frames, ruido=0.0, manos=2):
     for k in range(n_frames):
         t = k / max(1, n_frames - 1)
         pose = G.make_pose(random.Random(7), 0.5, 0.45, 0.24)
+        pose_mundo = G.make_pose_mundo(random.Random(17), 0.32, 0.10)
         ang = fase + t * 3.0
 
         def mano(base_x, base_y, signo):
@@ -59,7 +60,7 @@ def hacer_sena(semilla, n_frames, ruido=0.0, manos=2):
 
         izq = mano(0.38, 0.60, -1) if manos == 2 else None
         der = mano(0.63, 0.58, 1)
-        raw.append((pose, izq, der))
+        raw.append((pose, pose_mundo, izq, der))
 
     return sn.normalize_sequence(raw)
 

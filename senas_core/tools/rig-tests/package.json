@@ -1,0 +1,7 @@
+{
+  "name": "univoz-rig-tests",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test *.test.mjs" },
+  "devDependencies": { "three": "0.160.0" }
+}

@@ -1,0 +1,8 @@
+# t_ms left_x right_x detection_order labels
+0 0.680 0.320 LR correct
+33 0.635 0.365 RL flipped
+66 0.590 0.410 RL flipped
+99 0.545 0.455 RL flipped
+132 0.500 0.500 RL flipped
+165 0.455 0.545 RL flipped
+198 0.410 0.590 RL flipped

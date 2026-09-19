@@ -15,6 +15,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 
 import 'avatar_bridge.dart';
 import 'dtw.dart';
+import 'muestras_locales.dart';
 import 'plantillas.dart';
 
 /// Que brazos anima el avatar. Izquierda y derecha son las del AVATAR, tal
@@ -33,6 +34,7 @@ class _PantallaAvatarState extends State<PantallaAvatar> {
   final _bridge = AvatarBridge();
   final _controladorTexto = TextEditingController();
   final _voz = stt.SpeechToText();
+  final _almacen = AlmacenMuestras.instancia;
 
   Diccionario? _diccionario;
   bool _cargando = true;
@@ -53,6 +55,8 @@ class _PantallaAvatarState extends State<PantallaAvatar> {
   }
 
   Future<void> _cargar() async {
+    await _almacen.cargar();
+    await _bridge.configurarRig(_almacen.ajustes.rigCalibration);
     final d = await cargarDiccionario();
     if (!mounted) return;
     setState(() {
@@ -146,7 +150,7 @@ class _PantallaAvatarState extends State<PantallaAvatar> {
       _aviso = null;
     });
     await _voz.listen(
-      localeId: 'es_MX',
+      listenOptions: stt.SpeechListenOptions(localeId: 'es_MX'),
       onResult: (r) {
         _controladorTexto.text = r.recognizedWords;
         if (r.finalResult && r.recognizedWords.trim().isNotEmpty) {

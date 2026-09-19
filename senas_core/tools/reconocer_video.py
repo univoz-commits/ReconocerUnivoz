@@ -70,7 +70,7 @@ def main():
         extractor.cerrar()
 
     if args.espejo:
-        raw_frames = [(p, r, l) for (p, l, r) in raw_frames]
+        raw_frames = [(p, pm, r, l) for (p, pm, l, r) in raw_frames]
 
     seq = sn.normalize_sequence(raw_frames, t=sn.T_FRAMES)
     if seq is None:
